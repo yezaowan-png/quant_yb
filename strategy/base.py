@@ -70,13 +70,19 @@ class BaseStrategy(bt.Strategy):
             if self._next_buy_signal(data):
                 self.buy_signal_dates.append(today.strftime("%Y-%m-%d"))
                 if pos == 0:
-                    self.buy(data=data)
-                    self._buy_dates[data] = today
+                    # A股最小交易单位 100 股（1手），按可用资金 95% 计算手数
+                    cash = self.broker.getcash()
+                    price = data.close[0]
+                    lots = int(cash * 0.95 / (price * 100))
+                    size = lots * 100
+                    if size > 0:
+                        self.buy(data=data, size=size)
+                        self._buy_dates[data] = today
 
             if pos > 0 and self._next_sell_signal(data):
                 buy_date = self._buy_dates.get(data)
                 if buy_date is not None and today > buy_date:
-                    self.sell(data=data)
+                    self.sell(data=data, size=pos)
 
     def notify_order(self, order: bt.Order):
         if order.status not in (order.Completed,):

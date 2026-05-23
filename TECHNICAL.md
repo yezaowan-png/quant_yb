@@ -240,13 +240,24 @@ def next(self):
     if self._next_buy_signal(data):
         self.buy_signal_dates.append(today)   # 记录买点日期
         if pos == 0:
-            self.buy(data=data)
-            self._buy_dates[data] = today     # 记录买入日期
+            # A股最小交易单位 100 股（1手），按可用资金 95% 计算手数
+            cash = self.broker.getcash()
+            price = data.close[0]
+            lots = int(cash * 0.95 / (price * 100))
+            size = lots * 100
+            if size > 0:
+                self.buy(data=data, size=size)
+                self._buy_dates[data] = today     # 记录买入日期
 
     elif pos > 0 and self._next_sell_signal(data):
-        if today > buy_date:                  # 必须持有超过一天
-            self.sell(data=data)
+        if today > buy_date:                      # 必须持有超过一天
+            self.sell(data=data, size=pos)
 ```
+
+**持仓管理**：
+- 买入时按可用资金的 95% 计算手数（留 5% 缓冲应对滑点和手续费）
+- 按 A 股规则取 100 股（1手）整数倍
+- 卖出时清仓（size=pos），避免分批卖出复杂度
 
 **买点追踪**：`buy_signal_dates` 列表记录所有出现买入信号的日期（无论是否实际成交），用于后续的买点扫描功能。这比只查交易记录更准确，因为当已有持仓时买入信号不会产生新的交易。
 
@@ -298,9 +309,9 @@ class MacdCrossStrategy(BaseStrategy):
 
 ---
 
-## 策略详解
+## 所有策略实现细节
 
-### 双均线交叉策略 (sma_cross)
+### 1. 双均线交叉策略 (sma_cross) — `strategy/sma_cross.py`
 
 #### 数学原理
 
@@ -379,15 +390,96 @@ def _next_sell_signal(self, data) -> bool:
 
 ---
 
-### `visual/kline_chart.py` — K线图
+### 2. MACD金叉策略 (macd_cross) — `strategy/macd_cross.py`
+
+**核心思想**：MACD 指标的金叉/死叉判断买卖。DIF（快线）上穿 DEA（慢线）为金叉买入，下穿为死叉卖出。
+
+**参数**：`fast_period=12`, `slow_period=26`, `signal_period=9`
+
+**数学公式**（EMA = 指数移动平均）：
+
+$$DIF = EMA(close, 12) - EMA(close, 26)$$
+$$DEA = EMA(DIF, 9)$$
+$$MACD柱 = 2 \times (DIF - DEA)$$
+
+**金叉条件**：`DIF_t > DEA_t` 且 `DIF_{t-1} <= DEA_{t-1}`
+**死叉条件**：`DIF_t < DEA_t` 且 `DIF_{t-1} >= DEA_{t-1}`
+
+---
+
+### 3. KDJ超买超卖策略 (kdj) — `strategy/kdj.py`
+
+**核心思想**：利用KDJ指标的超买超卖区间。K值低于oversold（20）且出现金叉时买入，高于overbought（80）且出现死叉时卖出。
+
+**参数**：`k_period=9`, `smooth=3`, `oversold=20`, `overbought=80`
+
+**KDJ 计算流程**：
+1. $RSV(n) = \frac{close - low_n}{high_n - low_n} \times 100$
+2. $K = EMA(RSV, smooth)$
+3. $D = EMA(K, smooth)$
+4. $J = 3K - 2D$
+
+**引入自定义 Indicator**：因为 backtrader 不内置 KDJ，策略文件中定义了 `KDJIndicator(bt.Indicator)` 类，通过 `Highest`/`Lowest` 加 `EMA` 组合实现。
+
+---
+
+### 4. 布林带策略 (bollinger) — `strategy/bollinger.py`
+
+**核心思想**：价格触及布林下轨后反弹买入，触及上轨后回落卖出。前一天收盘价低于下轨 → 今天可能反弹买入；前一天收盘价高于上轨 → 今天可能回落卖出。
+
+**参数**：`period=20`, `devfactor=2.0`
+
+**布林带公式**：
+- 中轨 = $SMA(close, period)$
+- 上轨 = 中轨 + $devfactor \times \text{标准差}$
+- 下轨 = 中轨 - $devfactor \times \text{标准差}$
+
+---
+
+### 5. RSI超买超卖策略 (rsi) — `strategy/rsi.py`
+
+**核心思想**：RSI < oversold（30）为超卖区买入，RSI > overbought（70）为超买区卖出。
+
+**参数**：`period=14`, `oversold=30`, `overbought=70`
+
+**RSI 公式**（Wilder's RSI）：
+
+$$RSI = 100 - \frac{100}{1 + RS}$$
+
+其中 $RS = \frac{\text{平均涨幅}}{\text{平均跌幅}}$（period 日平滑）
+
+---
+
+### 6. 单均线策略 (single_ma) — `strategy/single_ma.py`
+
+**核心思想**：最简单的趋势策略——收盘价上穿均线买入，下穿卖出。
+
+**参数**：`period=20`
+
+**适用场景**：强趋势行情中简单有效；震荡市中假信号非常多。
+
+---
+
+### `visual/kline_chart.py` — K线 + 均线 + 指标图表组件
+
+**核心函数**：
+
+| 函数 | 产出 | 说明 |
+|------|------|------|
+| `create_kline_chart()` | K线 + MA叠加 Grid | 可选 ma5/ma10/ma20/ma60 均线叠加，含买卖点标记 |
+| `create_volume_chart()` | 成交量柱状图 Grid | 红涨绿跌双 Bar 系列（stack 叠加），含 dataZoom |
+| `create_macd_chart()` | MACD 指标图 | DIF/DEA 线 + 柱状图 |
+| `create_kdj_chart()` | KDJ 指标图 | K/D/J 三线，0-100 定轴 |
+| `create_rsi_chart()` | RSI 指标图 | RSI 线 + 30/70 超买超卖虚线参考线 |
 
 **实现思路**：
 
-1. 使用 pyecharts 的 `Kline` 图表类型，需要 OHLC 格式数据（Open, High, Low, Close 顺序）
-2. 买卖点通过 `MarkPoint` 叠加在 K 线图上：
-   - 买入点：红色三角标记，显示 "B"
-   - 卖出点：绿色箭头标记，显示 "S"
-3. 默认展示最近约 30% 的数据范围（通过 `DataZoomOpts` 的 `range_start` 控制），避免数据太多时蜡烛图太窄
+1. K 线图使用 pyecharts 的 `Kline`，通过 `.overlap()` 叠加多条 Line（均线）
+2. 成交量通过 Bar 双系列（stack 叠加）实现红涨绿跌配色
+3. 各指标图（成交量/MACD/KDJ/RSI）均为独立 Grid 图表，高度 300px
+4. 每个图表都包含 `DataZoomOpts(type_="inside")` 用于同步联动
+5. 买卖点标记：买入红三角朝上，卖出绿三角朝下
+6. 默认展示最近约 30% 的数据范围，避免数据太多时蜡烛太窄
 
 ---
 
@@ -396,14 +488,22 @@ def _next_sell_signal(self, data) -> bool:
 **实现思路**：
 
 1. `generate_report()` 是总入口，接收 K线数据、交易记录、权益数据
-2. 调用 `create_kline_chart()` 生成 K 线图
-3. 如果有权益数据，调用 `_create_equity_chart()` 生成权益曲线（叠加回撤面积图），然后用 `Grid` 将两张图上下拼接
-4. 如果没有权益数据，只显示 K 线图
+2. 从 OHLC 数据计算技术指标：`_calc_ma()`（4条均线）、`_calc_macd()`（DIF/DEA/柱）、`_calc_kdj()`（K/D/J）、`_calc_rsi()`（RSI）
+3. 依次生成 5 个图表：K线图（含均线+买卖点）+ 4个指标图（成交量/MACD/KDJ/RSI）+ 权益曲线图
+4. `_extract_chart_parts()` 用正则从 pyecharts 的 `render_embed()` 输出中提取 div、script 和 chart 变量名
+5. `_build_page()` 拼装完整 HTML，包含：
+   - **标签页 UI**（CSS 控制显示/隐藏）在 K线图下方切换成交量/MACD/KDJ/RSI
+   - **ECharts 联动**：通过 `chart.group = 'quant_group'` + `echarts.connect('quant_group')` 让所有图表的 dataZoom 同步
+   - 标签切换时对目标图表调用 `chart.resize()` 修复隐藏后的渲染问题
 
-**权益曲线设计**：
-- 使用双 Y 轴：左轴显示权益金额，右轴显示回撤百分比
-- 回撤区域用半透明红色填充，直观展示风险
-- 平滑曲线（`is_smooth=True`）减少视觉噪音
+**报告包含的图表板块**：
+1. K线图（含 MA5/MA10/MA20/MA60 + 买卖点标记）
+2. 联动指标区（标签页切换，与 K线图缩放同步）：
+   - 成交量（红涨绿跌柱状图）
+   - MACD（DIF/DEA + 柱状图）
+   - KDJ（K/D/J 三线，0-100）
+   - RSI（RSI线 + 30/70 参考线）
+3. 权益曲线 + 回撤
 
 ---
 

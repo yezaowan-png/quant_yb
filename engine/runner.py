@@ -1,7 +1,8 @@
 """回测引擎 —— 封装 backtrader，输出绩效与交易流水"""
 
+import os
+import sys
 import time
-import threading
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import date, timedelta
 from pathlib import Path
@@ -56,66 +57,92 @@ def load_strategy_class(strategy_name: str):
 #  模块级 worker 函数 —— 供 ProcessPoolExecutor 使用
 # ============================================================
 
-def _process_backtest_worker(task: dict) -> dict:
-    """进程级回测 worker：独立创建 BacktestRunner，完成单只股票回测"""
-    sym = task["sym"]
-    df_json = task["df_json"]
-    df = pd.read_json(df_json, orient="table")
-    df["date"] = pd.to_datetime(df["date"])
-    config = task["config"]
-    strategy_name = task["strategy_name"]
-    strategy_params = task.get("strategy_params", {})
+def _make_executor(workers: int) -> ProcessPoolExecutor:
+    """创建进程池，兼容不同 Python 版本（max_tasks_per_child 需 3.11+）"""
+    try:
+        return ProcessPoolExecutor(max_workers=workers, max_tasks_per_child=100)
+    except TypeError:
+        return ProcessPoolExecutor(max_workers=workers)
 
-    runner = BacktestRunner(config)
-    strategy_cls = load_strategy_class(strategy_name)
-    params = {**strategy_params, "symbol": sym}
-    result = runner.run(df, strategy_cls, params, verbose=False)
 
-    return {
-        "sym": sym,
-        "stats": result["stats"],
-        "trade_records": result["trade_records"],
-        "equity": result["equity"],
-        "buy_signal_dates": result["buy_signal_dates"],
-    }
+def _process_backtest_worker(task: dict) -> Optional[dict]:
+    """进程级回测 worker：回测 + 文件导出"""
+    # 子进程抑制所有输出，防止 VS Code 终端白屏
+    sys.stdout = open(os.devnull, "w")
+    sys.stderr = open(os.devnull, "w")
+    # 限制 BLAS 线程数，防止 OpenBLAS 在多进程中耗尽内存
+    for key in ("OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "OMP_NUM_THREADS",
+                "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
+        os.environ[key] = "1"
+
+    try:
+        sym = task["sym"]
+        df = task["df"]
+        config = task["config"]
+        strategy_name = task["strategy_name"]
+        strategy_params = task.get("strategy_params", {})
+        trades_dir = task["trades_dir"]
+
+        runner = BacktestRunner(config)
+        strategy_cls = load_strategy_class(strategy_name)
+        params = {**strategy_params, "symbol": sym}
+        result = runner.run(df, strategy_cls, params, verbose=False)
+
+        runner._export_trade_log(result["trade_records"], trades_dir, sym, strategy_name)
+        runner._export_equity(result["equity"], trades_dir, sym, strategy_name)
+
+        return {
+            "sym": sym,
+            "stats": result["stats"],
+            "buy_signal_dates": result["buy_signal_dates"],
+        }
+    except Exception as e:
+        return {"sym": sym, "error": str(e)}
 
 
 def _process_scan_worker(task: dict) -> Optional[dict]:
     """进程级扫描 worker"""
-    sym = task["sym"]
-    df_json = task["df_json"]
-    df = pd.read_json(df_json, orient="table")
-    df["date"] = pd.to_datetime(df["date"])
-    config = task["config"]
-    strategy_name = task["strategy_name"]
-    strategy_params = task.get("strategy_params", {})
-    lookback_days = task.get("lookback_days", 5)
+    sys.stdout = open(os.devnull, "w")
+    sys.stderr = open(os.devnull, "w")
+    for key in ("OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "OMP_NUM_THREADS",
+                "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
+        os.environ[key] = "1"
 
-    runner = BacktestRunner(config)
-    strategy_cls = load_strategy_class(strategy_name)
-    params = {**strategy_params, "symbol": sym}
-    result = runner.run(df, strategy_cls, params, verbose=False)
+    try:
+        sym = task["sym"]
+        df = task["df"]
+        config = task["config"]
+        strategy_name = task["strategy_name"]
+        strategy_params = task.get("strategy_params", {})
+        lookback_days = task.get("lookback_days", 5)
 
-    all_dates = sorted(df["date"].unique())
-    recent_boundary = (
-        all_dates[-lookback_days] if len(all_dates) >= lookback_days else all_dates[0]
-    )
-    boundary_str = (
-        recent_boundary.strftime("%Y-%m-%d")
-        if hasattr(recent_boundary, "strftime")
-        else str(recent_boundary)[:10]
-    )
-    recent = [d for d in result["buy_signal_dates"] if d >= boundary_str]
+        runner = BacktestRunner(config)
+        strategy_cls = load_strategy_class(strategy_name)
+        params = {**strategy_params, "symbol": sym}
+        result = runner.run(df, strategy_cls, params, verbose=False)
 
-    if not recent:
+        all_dates = sorted(df["date"].unique())
+        recent_boundary = (
+            all_dates[-lookback_days] if len(all_dates) >= lookback_days else all_dates[0]
+        )
+        boundary_str = (
+            recent_boundary.strftime("%Y-%m-%d")
+            if hasattr(recent_boundary, "strftime")
+            else str(recent_boundary)[:10]
+        )
+        recent = [d for d in result["buy_signal_dates"] if d >= boundary_str]
+
+        if not recent:
+            return None
+        return {
+            "symbol": sym,
+            "recent_buy_dates": ", ".join(recent),
+            "signal_count": len(recent),
+            "last_price": float(df["close"].iloc[-1]),
+            "total_return_pct": result["stats"]["total_return_pct"],
+        }
+    except Exception:
         return None
-    return {
-        "symbol": sym,
-        "recent_buy_dates": ", ".join(recent),
-        "signal_count": len(recent),
-        "last_price": float(df["close"].iloc[-1]),
-        "total_return_pct": result["stats"]["total_return_pct"],
-    }
 
 
 # ============================================================
@@ -207,7 +234,7 @@ class BacktestRunner:
         }
 
     # ------------------------------------------------------------
-    #  批量回测 / 扫描（ProcessPoolExecutor）
+    #  批量回测 / 扫描（ThreadPoolExecutor）
     # ------------------------------------------------------------
 
     def run_batch(
@@ -223,15 +250,15 @@ class BacktestRunner:
 
         summaries: list[dict] = []
         all_buy_signals: list[dict] = []
+        failed = 0
         trades_dir = Path(self.config["output"]["trades_dir"])
         trades_dir.mkdir(parents=True, exist_ok=True)
 
         click.echo(f"  并行回测 (进程数: {workers}, 共 {total} 只)")
 
-        # 构建 task 列表（DataFrame 序列化为 dict）
+        # 构建 task 列表
         tasks = []
         for sym, df in data_map.items():
-            # 预先提取日期用于信号过滤
             all_dates = sorted(df["date"].unique())
             recent_boundary = all_dates[-5] if len(all_dates) >= 5 else all_dates[0]
             boundary_str = (
@@ -241,10 +268,11 @@ class BacktestRunner:
             )
             tasks.append({
                 "sym": sym,
-                "df_json": self._df_to_json(df),
+                "df": df,
                 "config": self.config,
                 "strategy_name": strategy_name,
                 "strategy_params": sp,
+                "trades_dir": trades_dir,
                 "boundary_str": boundary_str,
             })
 
@@ -252,7 +280,7 @@ class BacktestRunner:
         t0 = time.monotonic()
         completed = 0
 
-        with ProcessPoolExecutor(max_workers=workers) as executor:
+        with _make_executor(workers) as executor:
             futures = {executor.submit(_process_backtest_worker, t): t["sym"] for t in tasks}
             for future in as_completed(futures):
                 sym = futures[future]
@@ -260,12 +288,13 @@ class BacktestRunner:
                 try:
                     r = future.result()
                 except Exception as e:
-                    click.echo(f"  [{sym}] 回测失败: {e}", err=True)
+                    failed += 1
+                    click.echo(f"  [{sym}] 进程异常: {e}", err=True)
                     continue
 
-                # 主进程负责文件 I/O
-                self._export_trade_log(r["trade_records"], trades_dir, sym, strategy_name)
-                self._export_equity(r["equity"], trades_dir, sym, strategy_name)
+                if r is None or "error" in r:
+                    failed += 1
+                    continue
 
                 stats = r["stats"]
                 stats["symbol"] = sym
@@ -281,13 +310,15 @@ class BacktestRunner:
                         "signal_count": len(recent),
                     })
 
-                if completed % 50 == 0 or completed == total:
+                if completed % 100 == 0 or completed == total:
                     elapsed = time.monotonic() - t0
                     rate = completed / elapsed if elapsed > 0 else 0
                     click.echo(f"  进度: {completed}/{total}  已耗时: {elapsed:.0f}s  速率: {rate:.1f}只/秒")
 
         elapsed = time.monotonic() - t0
         click.echo(f"  回测完成，总耗时: {elapsed:.0f} 秒 ({elapsed/60:.1f} 分钟)")
+        if failed:
+            click.echo(f"  失败: {failed} 只 (数据异常或指标计算失败，已自动跳过)")
 
         summaries.sort(key=lambda x: x["symbol"])
         all_buy_signals.sort(key=lambda x: x["symbol"])
@@ -312,7 +343,7 @@ class BacktestRunner:
         tasks = [
             {
                 "sym": sym,
-                "df_json": self._df_to_json(df),
+                "df": df,
                 "config": self.config,
                 "strategy_name": strategy_name,
                 "strategy_params": sp,
@@ -325,7 +356,7 @@ class BacktestRunner:
         t0 = time.monotonic()
         completed = 0
 
-        with ProcessPoolExecutor(max_workers=workers) as executor:
+        with _make_executor(workers) as executor:
             futures = {executor.submit(_process_scan_worker, t): t["sym"] for t in tasks}
             for future in as_completed(futures):
                 completed += 1
@@ -333,9 +364,9 @@ class BacktestRunner:
                     r = future.result()
                     if r is not None:
                         results.append(r)
-                except Exception as e:
-                    click.echo(f"  [{futures[future]}] 扫描失败: {e}", err=True)
-                if completed % 50 == 0 or completed == total:
+                except Exception:
+                    pass
+                if completed % 100 == 0 or completed == total:
                     click.echo(f"  进度: {completed}/{total}")
 
         elapsed = time.monotonic() - t0
@@ -348,13 +379,6 @@ class BacktestRunner:
     # ------------------------------------------------------------
     #  工具方法
     # ------------------------------------------------------------
-
-    @staticmethod
-    def _df_to_json(df: pd.DataFrame) -> str:
-        """将 DataFrame 序列化为 JSON 字符串（保留日期类型）"""
-        out = df.copy()
-        out["date"] = out["date"].apply(lambda x: x.strftime("%Y-%m-%d") if hasattr(x, "strftime") else str(x)[:10])
-        return out.to_json(orient="table", date_format="iso")
 
     def _build_stats(self, strat: bt.Strategy, final_value: float) -> dict[str, Any]:
         ta = strat.analyzers.trades.get_analysis()

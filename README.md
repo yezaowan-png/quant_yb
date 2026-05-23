@@ -6,11 +6,12 @@
 
 比如你有一个想法："当 5 日均线上穿 20 日均线时买入，下穿时卖出"，这个策略到底能不能赚钱？在过去三年里表现如何？这个系统可以给你答案，并生成图表让你直观看到每一次买卖点。
 
-它包含四个功能：
+它包含五个功能：
 1. **下载数据** — 从网络获取 A 股的历史K线数据，存到本地（默认全市场非ST股票）
-2. **策略回测** — 用历史数据模拟你的策略，算出收益率、胜率等指标
-3. **扫描买点** — 检测最近N日内存在买入信号的股票，汇总导出
-4. **生成报告** — 把回测结果画成 K线图 + 资金曲线图，存为 HTML 文件
+2. **策略回测** — 用历史数据模拟你的策略，算出收益率、胜率等指标（内置6种策略）
+3. **策略对比** — 一次运行所有策略，横向对比找出最优
+4. **扫描买点** — 检测最近N日内存在买入信号的股票，汇总导出
+5. **生成报告** — 把回测结果画成 K线图（含均线、成交量）+ MACD + KDJ + 资金曲线图，存为 HTML 文件
 
 ## 第一次使用（环境准备）
 
@@ -71,6 +72,7 @@ python main.py
 quant> download --start 20210101 --end 20231231
 quant> backtest --strategy sma_cross --symbol 000001.SZ
 quant> scan --strategy sma_cross
+quant> compare --symbol 000001.SZ
 quant> report --symbol 000001.SZ --strategy sma_cross
 quant> help
 quant> exit
@@ -86,6 +88,27 @@ quant> exit
 4. `report --symbol 000001.SZ --strategy sma_cross` → 生成 HTML 可视化报告
 
 生成的报告在 `output/reports/` 文件夹里，用浏览器打开即可查看。
+
+报告包含以下内容：
+- **K线图**：带 5/10/20/60 日均线叠加和买卖点标记
+- **联动指标区**（标签页切换，缩放同步）：
+  - 成交量 — 红涨绿跌柱状图
+  - MACD — DIF / DEA 线 + 柱状图
+  - KDJ — K / D / J 三线（0-100 区间）
+  - RSI — RSI 线 + 30/70 超买超卖参考线
+- **权益曲线**：账户资金变化 + 回撤阴影
+
+> 提示：在 K 线图上缩放/平移时，下方指标图会同步联动。点击标签页可在成交量、MACD、KDJ、RSI 之间切换。
+
+命令示例：
+
+```
+quant> compare --symbol 000001.SZ
+```
+
+这会对指定股票依次运行所有6种策略，输出横向对比表格，帮你快速找到最适合这只股票的策略。
+
+### 策略对比
 
 ### 方式二：直接命令（适合脚本和自动化）
 
@@ -108,6 +131,19 @@ python main.py backtest scan --strategy sma_cross --days 5
 # 生成报告
 python main.py backtest report --symbol 000001.SZ
 ```
+
+## 可用策略一览
+
+系统内置 6 种策略，可通过 `compare --symbol <代码>` 一键对比：
+
+| 策略 | 命令名 | 核心参数 | 适合场景 |
+|------|--------|----------|----------|
+| 双均线交叉 | `sma_cross` | `--fast 5 --slow 20` | 趋势跟踪 |
+| MACD金叉 | `macd_cross` | `--fast 12 --slow 26` | 趋势跟踪 |
+| KDJ超买超卖 | `kdj` | `--oversold 20 --overbought 80` | 震荡市 |
+| 布林带 | `bollinger` | `--period 20 --devfactor 2` | 均值回归 |
+| RSI超买超卖 | `rsi` | `--period 14 --oversold 30 --overbought 70` | 震荡市 |
+| 单均线 | `single_ma` | `--period 20` | 简单趋势 |
 
 ## 策略详解
 
@@ -218,6 +254,78 @@ quant_yb/
 │   └── signals/         ← 买点扫描汇总输出
 └── CLAUDE.md            ← 给 AI 助手的说明文档
 ```
+
+## 输出文件说明
+
+回测和扫描会产生以下 CSV 文件，均位于 `output/` 目录下。
+
+### 1. 交易流水 — `trades/{symbol}_{strategy}.csv`
+
+每笔买卖的详细记录。
+
+| 列名 | 含义 |
+|------|------|
+| `date` | 交易日期 |
+| `symbol` | 股票代码 |
+| `direction` | 买卖方向：`BUY`（买入）或 `SELL`（卖出） |
+| `price` | 成交均价（含滑点） |
+| `size` | 成交股数，正数为买入、负数为卖出 |
+| `commission` | 手续费（佣金 + 卖出印花税） |
+| `pnl` | 盈亏金额（仅卖出时有效，买入行为 0） |
+
+每两行构成一次完整交易（买入 → 卖出），卖出行的 `pnl` 即本次交易的盈亏。
+
+### 2. 权益曲线 — `trades/{symbol}_{strategy}_equity.csv`
+
+每个交易日的账户权益和回撤，用于画资金曲线图。
+
+| 列名 | 含义 |
+|------|------|
+| `dates` | 交易日期 |
+| `equity` | 当日账户总资金（现金 + 持仓市值） |
+| `drawdowns` | 当日回撤幅度（%）。计算公式：`(当前权益 - 历史最高权益) / 历史最高权益 × 100` |
+
+### 3. 批量汇总 — `trades/_summary_{strategy}.csv`
+
+批量回测时，所有股票的绩效汇总在一张表中。
+
+| 列名 | 含义 |
+|------|------|
+| `symbol` | 股票代码 |
+| `initial_cash` | 初始资金（默认 100,000 元） |
+| `final_value` | 最终资金 |
+| `total_return_pct` | 总收益率（%） |
+| `total_trades` | 总交易次数 |
+| `win_trades` | 盈利交易次数 |
+| `lose_trades` | 亏损交易次数 |
+| `win_rate_pct` | 胜率（%） |
+| `sharpe_ratio` | 夏普比率（越高越好，> 1 算优秀） |
+| `max_drawdown_pct` | 最大回撤（%） |
+| `max_drawdown_days` | 最大回撤持续天数 |
+
+### 4. 策略对比 — `trades/_comparison_{symbol}.csv`
+
+`compare` 命令的输出，对比同一只股票上所有策略的表现。
+
+| 列名 | 含义 |
+|------|------|
+| `strategy` | 策略名称 |
+| `return_pct` | 总收益率（%） |
+| `sharpe` | 夏普比率 |
+| `max_dd_pct` | 最大回撤（%） |
+| `trades` | 交易次数 |
+| `win_rate_pct` | 胜率（%） |
+| `final_value` | 最终资金 |
+
+### 5. 买点信号 — `signals/buy_signals_{strategy}_{日期}.csv`
+
+`scan` 命令或批量回测的输出，汇总最近 N 日内出现买入信号的股票。
+
+| 列名 | 含义 |
+|------|------|
+| `symbol` | 股票代码 |
+| `recent_buy_dates` | 最近 N 日内的买点日期（多个用逗号分隔） |
+| `signal_count` | 买点数量 |
 
 ## 常见问题
 
