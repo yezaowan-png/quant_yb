@@ -1,0 +1,31 @@
+tushare:
+  token: "你的Tushare Token"   # 在 https://tushare.pro 注册获取
+
+data:
+  cache_dir: "data/cache"
+
+backtest:
+  initial_cash: 100000.0
+  commission: 0.00025        # 佣金费率 0.025%
+  stamp_duty: 0.001          # 印花税 0.1% (仅卖出)
+  min_commission: 5.0        # 最低佣金 5 元
+
+rate_limit:
+  calls_per_minute: 500
+
+output:
+  trades_dir: "output/trades"
+  reports_dir: "output/reports"
+  signals_dir: "output/signals"
+
+parallel:
+  download_workers: 5
+  backtest_workers: 12
+
+defaults:
+  start_date: "20210101"
+
+watchlist:
+  - "000001.SZ"
+  - "000002.SZ"
+  - "600519.SH"

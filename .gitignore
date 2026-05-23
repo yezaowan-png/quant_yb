@@ -1,0 +1,24 @@
+# 敏感配置（含 API token）
+config.yaml
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+
+# IDE
+.idea/
+.vscode/
+
+# 数据缓存（CSV 太大）
+data/cache/
+
+# 输出目录
+output/trades/
+output/reports/
+output/signals/
+
+# 系统文件
+.DS_Store
+Thumbs.db
