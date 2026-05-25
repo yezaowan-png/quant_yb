@@ -7,7 +7,7 @@
 | CLI 框架 | click | 命令行参数解析、交互式命令 REPL |
 | 数据源 | tushare | A股日K线行情数据 API、股票列表 |
 | 回测引擎 | backtrader | 事件驱动回测框架（Cerebro 架构） |
-| 图表 | pyecharts | 基于 ECharts 的 Python 可视化库 |
+| 图表 | pyecharts / ECharts | pyecharts 用于分析报告图表；回测报告改用自研 JS 渲染器直连 ECharts CDN |
 | 数据处理 | pandas, numpy | DataFrame 操作、数值计算 |
 | 配置 | pyyaml | YAML 配置文件解析 |
 
@@ -102,6 +102,8 @@ def cli(ctx):
 
 这样设计的好处：同一个入口，既能 `python main.py` 进入 REPL，也能 `python main.py data download ...` 直接执行命令。后者适合脚本化、批量处理场景。
 
+**`run` 命令**：注册为 `@cli.command("run")`，接受命令字符串（分号/换行分隔）或 `--file` 脚本文件，调用 `shell.py` 中的 `_execute_pipeline()` 按顺序执行。支持 `!` 前缀忽略某条命令的失败。
+
 ---
 
 ### `cli/shell.py` — 交互式命令 REPL
@@ -112,6 +114,7 @@ def cli(ctx):
 2. **命令路由**：根据第一个词路由到对应的处理函数（`_cmd_download`、`_cmd_backtest`、`_cmd_scan`、`_cmd_report`），支持简写（如 `dl` → download、`bt` → backtest、`rp` → report）。
 3. **异常保护**：每个命令用 `try/except` 包裹，出错时打印错误信息但不退出程序。
 4. **自动发现**：`_list_cached_symbols()` 扫描 `data/cache/*.csv` 自动列出已下载的股票；`_list_strategies()` 扫描 `strategy/*.py` 自动列出可用策略。
+5. **命令流水线**：`_execute_pipeline()` 接受分号或换行分隔的命令字符串，按序逐条执行。遇到错误时默认中止，可用 `!` 前缀忽略某条失败继续。`_cmd_run()` 在交互式 Shell 中暴露该能力（支持字符串参数和 `--file` 脚本文件）。CLI 中对应的 `run` 命令注册在 `main.py`。
 
 **为什么从菜单改为命令 REPL？**
 菜单模式需要一级一级输入，操作效率低，且无法组合参数。命令模式一次输入就能完成操作（如 `download --symbol 000001.SZ --start 20210101 --force`），更符合程序员使用习惯，也方便脚本化。
@@ -142,6 +145,7 @@ def cli(ctx):
 3. **`backtest report`**：
    - 自动查找对应的交易流水文件和权益文件
    - 如果文件不存在给出明确提示（比如"请先执行 backtest run"）
+4. **批量报告并行**：`_run_batch_reports()` 使用 `ThreadPoolExecutor`（而非 `ProcessPoolExecutor`）并行生成 HTML 报告。线程池避免 Windows 上多进程 spawn 导致的 OpenBLAS 内存耗尽和进程挂起问题。模块顶部在 import pandas 之前设置 `OPENBLAS_NUM_THREADS=1` 等环境变量，防止子线程中 OpenBLAS 多线程竞争。
 
 ---
 
@@ -460,6 +464,25 @@ $$RSI = 100 - \frac{100}{1 + RS}$$
 
 ---
 
+### `cli/stats_cli.py` — 数据统计命令
+
+**实现思路**：
+
+注册 `stats` 命令组，包含两个子命令：
+- `stats analyze --strategy <name>` — 加载 `_summary_*.csv` 汇总数据，生成单策略全市场画像 HTML 报告
+- `stats compare` — 加载所有可用策略的汇总数据，生成多策略横向对比 HTML 报告
+
+数据来源于 `output/trades/_summary_{strategy}.csv`（批量回测时自动生成），无需重新运行回测。报告输出到 `output/statistics/` 目录。
+
+**分析指标计算**（见 `analysis/analyzer.py`）：
+- 收益率分布（histogram binning）
+- 风险收益散点数据（return vs max_dd）
+- TOP/BOTTOM 排行
+- 多策略雷达图归一化（Min-Max 归一化到 0-100，回撤维度反转）
+- Spearman 秩相关系数矩阵（基于同股票跨策略收益率）
+
+---
+
 ### `visual/kline_chart.py` — K线 + 均线 + 指标图表组件
 
 **核心函数**：
@@ -483,27 +506,43 @@ $$RSI = 100 - \frac{100}{1 + RS}$$
 
 ---
 
-### `visual/report.py` — 完整报告
+### `visual/report.py` — 完整报告（自研轻量渲染器）
 
 **实现思路**：
 
 1. `generate_report()` 是总入口，接收 K线数据、交易记录、权益数据
 2. 从 OHLC 数据计算技术指标：`_calc_ma()`（4条均线）、`_calc_macd()`（DIF/DEA/柱）、`_calc_kdj()`（K/D/J）、`_calc_rsi()`（RSI）
-3. 依次生成 5 个图表：K线图（含均线+买卖点）+ 4个指标图（成交量/MACD/KDJ/RSI）+ 权益曲线图
-4. `_extract_chart_parts()` 用正则从 pyecharts 的 `render_embed()` 输出中提取 div、script 和 chart 变量名
-5. `_build_page()` 拼装完整 HTML，包含：
-   - **标签页 UI**（CSS 控制显示/隐藏）在 K线图下方切换成交量/MACD/KDJ/RSI
-   - **ECharts 联动**：通过 `chart.group = 'quant_group'` + `echarts.connect('quant_group')` 让所有图表的 dataZoom 同步
-   - 标签切换时对目标图表调用 `chart.resize()` 修复隐藏后的渲染问题
+3. **不再使用 pyecharts**：所有图表数据序列化为紧凑 JSON，嵌入页面一次；JS 图表工厂模板（`_CHART_JS`，约 7.5KB）从共享数据创建 16 个 ECharts 实例
+4. 日K/周K/月K 各 5 张图（K线 + 成交量/MACD/KDJ/RSI）+ 1 张权益曲线 = 16 张图，数据共享不发生重复
+5. 报告体积从原来 pyecharts 方案的 3.2 MB 降低到 ~230 KB（**93% 缩减**）
+6. `_build_page()` 拼装完整 HTML，包含：
+   - **周期标签栏**（日K | 周K | 月K）
+   - **指标标签页**（成交量/MACD/KDJ/RSI 切换，作用域在当期周期 section 内）
+   - **ECharts 联动**：所有图表通过 `echarts.connect('qg')` 同步 dataZoom
+   - 标签切换时 80ms 延迟 resize 目标区域内的图表
 
 **报告包含的图表板块**：
-1. K线图（含 MA5/MA10/MA20/MA60 + 买卖点标记）
+1. K线图（含 MA5/MA10/MA20/MA60 + 买卖点标记），高度 500px
 2. 联动指标区（标签页切换，与 K线图缩放同步）：
-   - 成交量（红涨绿跌柱状图）
-   - MACD（DIF/DEA + 柱状图）
-   - KDJ（K/D/J 三线，0-100）
-   - RSI（RSI线 + 30/70 参考线）
-3. 权益曲线 + 回撤
+   - 成交量（红涨绿跌柱状图），300px
+   - MACD（DIF/DEA + 柱状图），350px
+   - KDJ（K/D/J 三线，自动缩放），350px
+   - RSI（RSI线 + 30/70 参考线），300px
+3. 权益曲线 + 回撤，520px
+
+---
+
+### `analysis/` — 全市场统计分析模块
+
+基于批量回测汇总数据（`_summary_*.csv`）生成亮色主题 HTML 分析报告。模块结构：
+
+| 文件 | 职责 |
+|------|------|
+| `analyzer.py` | 数据加载（`load_summary()`、`load_all_summaries()`）、分布统计（`compute_stats()`）、直方图分箱（`build_return_histogram()`）、雷达图归一化（`normalize_for_radar()`）、策略相关性矩阵（`compute_correlation_matrix()`） |
+| `charts.py` | 亮色主题 pyecharts 图表组件：收益率/夏普/交易次数直方图、风险收益散点图、雷达图、箱线图、柱状图、相关性图、策略叠加散点图 |
+| `report.py` | HTML 报告组装：`build_analyze_page()`（单策略画像）、`build_compare_page()`（多策略对比）。生成响应式卡片布局 + 图表嵌入页面 |
+
+**亮色主题常量**（独立于 `visual/kline_chart.py` 的暗色主题）：`_BG_COLOR = "white"`、`_TITLE_COLOR = "#1a1a2e"`、`_UP_COLOR = "#ef5350"`（红涨）、`_DOWN_COLOR = "#26a69a"`（绿跌）。
 
 ---
 

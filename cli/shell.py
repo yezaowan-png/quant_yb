@@ -123,7 +123,18 @@ def _print_help():
     click.echo("    参数: --symbol (股票代码)")
     click.echo("    示例: compare --symbol 000001.SZ")
     click.echo()
+    click.echo("  stats           数据统计分析")
+    click.echo("    子命令: analyze (单策略画像)  /  compare (多策略对比)")
+    click.echo("    参数: --strategy (策略名称, analyze 必需)")
+    click.echo("    示例: stats analyze --strategy rsi")
+    click.echo("          stats compare")
+    click.echo()
     click.echo("  list            列出已缓存股票和可用策略")
+    click.echo("  run             按顺序批量执行多条命令")
+    click.echo("    参数: 命令字符串（分号 ; 或换行分隔），或 --file 指定脚本文件")
+    click.echo("    每行可加 ! 前缀忽略该条失败继续执行")
+    click.echo("    示例: run \"download; backtest --strategy rsi; report; stats compare\"")
+    click.echo("          run --file pipeline.txt")
     click.echo("  help            显示本帮助")
     click.echo("  exit, quit      退出程序")
     click.echo()
@@ -188,8 +199,6 @@ def _cmd_backtest(config: dict, **kwargs):
             return
         click.echo(f"  未指定股票，将对全部 {len(sym_list)} 只已缓存股票进行批量回测。")
         click.echo(f"  建议先指定单只股票测试: backtest --strategy rsi --symbol 000001.SZ")
-        if not click.confirm("  确认批量回测全部股票?", default=False):
-            return
 
     data_map = {}
     for sym in sym_list:
@@ -387,6 +396,63 @@ def _cmd_compare(config: dict, **kwargs):
     click.secho(f"  最佳策略: {best_name} (收益率 {best_ret:+.2f}%)", fg="green")
 
 
+def _cmd_stats(config: dict, **kwargs):
+    """stats 命令路由：分发到 analyze 或 compare 子命令。"""
+    sub = kwargs.get("sub", "")
+    if isinstance(sub, bool):
+        sub = ""
+    sub = sub.strip().lower()
+
+    strategy = kwargs.get("strategy", "")
+    if isinstance(strategy, bool):
+        strategy = ""
+
+    from analysis.report import build_analyze_page, build_compare_page
+    from analysis.analyzer import load_summary, load_all_summaries, compute_stats, _STRATEGY_LABELS
+
+    stats_dir = Path(config["output"].get("statistics_dir", "output/statistics"))
+    stats_dir.mkdir(parents=True, exist_ok=True)
+
+    if sub == "analyze":
+        if not strategy:
+            click.secho("  请指定 --strategy。示例: stats analyze --strategy rsi", fg="red")
+            return
+        df = load_summary(strategy)
+        if df is None or len(df) == 0:
+            click.secho(f"  策略 '{strategy}' 无回测数据。请先执行 backtest run --strategy {strategy}", fg="red")
+            return
+        s = compute_stats(df)
+        display = _STRATEGY_LABELS.get(strategy, strategy)
+        click.echo()
+        click.secho(f"  {display} — 策略画像 ({s['count']} 只)", fg="green")
+        click.echo(f"  平均收益: {s['avg_return']:+.1f}%    中位数: {s['median_return']:+.1f}%")
+        click.echo(f"  正收益比例: {s['positive_ratio']:.1f}%    "
+                   f"平均夏普: {s['avg_sharpe']:.3f}    平均回撤: {s['avg_max_dd']:.1f}%")
+        click.echo(f"  平均胜率: {s['avg_win_rate']:.1f}%    平均交易: {s['avg_trades']} 次")
+        click.echo()
+        output_path = stats_dir / f"analysis_{strategy}.html"
+        build_analyze_page(strategy, df, output_path)
+        click.secho(f"  报告已生成: {output_path}", fg="green")
+    elif sub == "compare":
+        data_map = load_all_summaries()
+        if len(data_map) < 2:
+            click.secho("  需要至少 2 个策略有回测数据。", fg="red")
+            return
+        click.echo()
+        click.secho(f"  策略横向对比 ({len(data_map)} 个策略)", fg="green")
+        for name, df in data_map.items():
+            s = compute_stats(df)
+            display = _STRATEGY_LABELS.get(name, name)
+            click.echo(f"  {display:<10s}  {s['count']:>5d} 只  "
+                       f"收益 {s['avg_return']:>+7.1f}%  正向率 {s['positive_ratio']:>5.1f}%")
+        click.echo()
+        output_path = stats_dir / "comparison.html"
+        build_compare_page(data_map, output_path)
+        click.secho(f"  报告已生成: {output_path}", fg="green")
+    else:
+        click.secho(f'  未知子命令: "{sub}"。可用: analyze, compare。示例: stats analyze --strategy rsi', fg="red")
+
+
 def _cmd_list(config: dict):
     cached = _list_cached_symbols(config)
     strats = _list_strategies()
@@ -400,6 +466,109 @@ def _cmd_list(config: dict):
     for s in strats:
         click.echo(f"    {s}")
     click.echo()
+
+
+def _execute_pipeline(config: dict, commands_text: str) -> None:
+    """按顺序执行多条命令（分号或换行分隔）。
+
+    遇到错误立即停止，可通过 ! 前缀忽略某条命令的失败（类似 make）。"""
+    # 先按换行拆，再按分号拆
+    lines = []
+    for raw_line in commands_text.strip().split("\n"):
+        raw_line = raw_line.strip()
+        if not raw_line or raw_line.startswith("#"):
+            continue
+        for part in raw_line.split(";"):
+            part = part.strip()
+            if part and not part.startswith("#"):
+                lines.append(part)
+
+    if not lines:
+        click.secho("  没有可执行的命令。", fg="yellow")
+        return
+
+    for line_no, command_line in enumerate(lines, 1):
+        # 支持 ! 前缀：即使这条命令失败也继续
+        ignore_error = command_line.startswith("!")
+        if ignore_error:
+            command_line = command_line[1:].strip()
+
+        try:
+            parts = shlex.split(command_line)
+        except ValueError:
+            click.secho(f"  [{line_no}/{len(lines)}] 引号不匹配，跳过: {command_line}", fg="red")
+            if not ignore_error:
+                break
+            continue
+
+        if not parts:
+            continue
+
+        cmd = parts[0].lower()
+        args = _parse_args(parts[1:])
+
+        click.echo()
+        click.secho(f"── [{line_no}/{len(lines)}] $ {command_line}", fg="cyan")
+
+        try:
+            if cmd in ("exit", "quit", "q"):
+                click.secho(f"  流水线在第 {line_no} 条终止（exit）。", fg="yellow")
+                break
+            elif cmd == "help":
+                _print_help()
+            elif cmd == "list":
+                _cmd_list(config)
+            elif cmd in ("download", "dl"):
+                _cmd_download(config, **args)
+            elif cmd in ("backtest", "bt"):
+                _cmd_backtest(config, **args)
+            elif cmd == "scan":
+                _cmd_scan(config, **args)
+            elif cmd in ("report", "rp"):
+                _cmd_report(config, **args)
+            elif cmd in ("compare", "cmp"):
+                _cmd_compare(config, **args)
+            elif cmd == "stats":
+                sub = parts[1] if len(parts) > 1 else ""
+                sub_args = _parse_args(parts[2:]) if len(parts) > 2 else {}
+                sub_args["sub"] = sub
+                _cmd_stats(config, **sub_args)
+            else:
+                click.secho(f'  未知命令: "{cmd}"', fg="red")
+                if not ignore_error:
+                    click.secho(f"  流水线在第 {line_no} 条中止。", fg="red")
+                    break
+        except KeyboardInterrupt:
+            click.echo()
+            click.secho("  流水线被用户中断。", fg="yellow")
+            break
+        except Exception as e:
+            click.secho(f"  错误: {e}", fg="red")
+            if not ignore_error:
+                click.secho(f"  流水线在第 {line_no} 条中止。", fg="red")
+                break
+
+    click.echo()
+    click.secho(f"  流水线执行完毕。", fg="green")
+
+
+def _cmd_run(config: dict, **kwargs):
+    """run 命令：从参数或文件读取并执行命令序列。"""
+    commands_text = kwargs.get("commands", "")
+    file_path = kwargs.get("file", "")
+
+    if file_path:
+        file_p = Path(file_path)
+        if not file_p.exists():
+            click.secho(f"  文件不存在: {file_path}", fg="red")
+            return
+        commands_text = file_p.read_text(encoding="utf-8")
+
+    if not commands_text or not commands_text.strip():
+        click.secho("  请提供要执行的命令。用法: run \"cmd1; cmd2\" 或 run --file script.txt", fg="yellow")
+        return
+
+    _execute_pipeline(config, commands_text)
 
 
 def run_interactive():
@@ -437,6 +606,17 @@ def run_interactive():
             continue
 
         cmd = parts[0].lower()
+
+        # run 命令特殊处理：后续内容直接作为命令字符串
+        if cmd == "run":
+            file_arg = ""
+            commands_arg = " ".join(parts[1:])
+            if commands_arg.startswith("--file"):
+                file_arg = commands_arg[len("--file"):].strip()
+                commands_arg = ""
+            _cmd_run(config, commands=commands_arg, file=file_arg)
+            continue
+
         args = _parse_args(parts[1:])
 
         try:
@@ -456,6 +636,12 @@ def run_interactive():
                 _cmd_report(config, **args)
             elif cmd in ("compare", "cmp"):
                 _cmd_compare(config, **args)
+            elif cmd == "stats":
+                # stats has subcommands that _parse_args would drop
+                sub = parts[1] if len(parts) > 1 else ""
+                sub_args = _parse_args(parts[2:]) if len(parts) > 2 else {}
+                sub_args["sub"] = sub
+                _cmd_stats(config, **sub_args)
             else:
                 click.secho(f'  未知命令: "{cmd}"，输入 help 查看帮助。', fg="red")
         except KeyboardInterrupt:

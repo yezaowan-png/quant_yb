@@ -1,4 +1,4 @@
-"""K线图 + 均线叠加 + 成交量柱（pyecharts）—— Midnight 暗色主题"""
+"""K线图 + 均线叠加 + 成交量柱（pyecharts）—— 亮色主题"""
 
 import inspect
 
@@ -8,17 +8,17 @@ from pyecharts import options as opts
 # pyecharts 各版本 MarkPointItem 支持的参数不同，运行时自动检测
 _MARKPOINT_VALID_PARAMS = set(inspect.signature(opts.MarkPointItem.__init__).parameters.keys())
 
-# ---- 暗色主题常量 ----
-_CHART_BG = "#1a1d23"
-_TITLE_COLOR = "#e4e4e4"
-_AXIS_LABEL_COLOR = "#8b8d93"
-_AXIS_LINE_COLOR = "rgba(255,255,255,0.1)"
-_SPLIT_LINE_COLOR = "rgba(255,255,255,0.06)"
-_UP_COLOR = "#f06070"        # 涨（K线阳线、买点）
-_DOWN_COLOR = "#4ecb71"      # 跌（K线阴线、卖点）
-_DIF_COLOR = "#6c8cff"       # MACD DIF / KDJ K / RSI
-_DEA_COLOR = "#f0a030"       # MACD DEA / KDJ D
-_J_COLOR = "#f06070"         # KDJ J
+# ---- 亮色主题常量 ----
+_CHART_BG = "white"
+_TITLE_COLOR = "#1a1a2e"
+_AXIS_LABEL_COLOR = "#6b6b7b"
+_AXIS_LINE_COLOR = "#d0d0d8"
+_SPLIT_LINE_COLOR = "#e8e8ec"
+_UP_COLOR = "#ef5350"        # 涨（K线阳线、买点）— A股红涨
+_DOWN_COLOR = "#26a69a"      # 跌（K线阴线、卖点）— A股绿跌
+_DIF_COLOR = "#5470c6"       # MACD DIF / KDJ K / RSI
+_DEA_COLOR = "#e8a020"       # MACD DEA / KDJ D
+_J_COLOR = "#ee6666"         # KDJ J
 _MA_COLORS = ["#e8b830", "#60a5fa", "#a78bfa", "#fb7185"]  # MA5/10/20/60
 
 # ---------------------------------------------------------------------------
@@ -38,9 +38,9 @@ def _make_mark_point_item(name, coord, value, symbol, symbol_size,
     return opts.MarkPointItem(**kwargs)
 
 
-def _dark_axis_opts(is_category=True, boundary_gap=True, show_split=True,
-                    y_min=None, y_max=None, y_name=""):
-    """构建暗色主题通用轴配置"""
+def _axis_opts(is_category=True, boundary_gap=True, show_split=True,
+               y_min=None, y_max=None, y_name=""):
+    """构建亮色主题通用轴配置"""
     extra = {}
     if y_min is not None:
         extra["min_"] = y_min
@@ -62,8 +62,8 @@ def _dark_axis_opts(is_category=True, boundary_gap=True, show_split=True,
     )
 
 
-def _dark_yaxis(is_scale=False, y_min=None, y_max=None, y_name=""):
-    """暗色主题 Y 轴"""
+def _yaxis(is_scale=False, y_min=None, y_max=None, y_name=""):
+    """亮色主题 Y 轴（带 splitarea 底纹）"""
     extra = {}
     if y_min is not None:
         extra["min_"] = y_min
@@ -82,14 +82,14 @@ def _dark_yaxis(is_scale=False, y_min=None, y_max=None, y_name=""):
         ),
         splitarea_opts=opts.SplitAreaOpts(
             is_show=True,
-            areastyle_opts=opts.AreaStyleOpts(opacity=0.04),
+            areastyle_opts=opts.AreaStyleOpts(opacity=0.03),
         ),
         **extra,
     )
 
 
-def _dark_yaxis_compact(y_min=None, y_max=None, y_name=""):
-    """暗色 Y 轴（紧凑版，无 splitarea）"""
+def _yaxis_compact(y_min=None, y_max=None, y_name=""):
+    """亮色 Y 轴（紧凑版，无 splitarea）"""
     extra = {}
     if y_min is not None:
         extra["min_"] = y_min
@@ -131,7 +131,7 @@ def create_kline_chart(
             name="买入", coord=[date_str, price], value="买入",
             symbol="triangle", symbol_size=26,
             itemstyle_opts=opts.ItemStyleOpts(
-                color=_UP_COLOR, border_color="#ffffff", border_width=2,
+                color=_UP_COLOR, border_color="#fff", border_width=3,
             ),
             label_opts=opts.LabelOpts(is_show=True, position="top", font_size=11,
                                       font_weight="bold", color=_UP_COLOR, distance=8),
@@ -142,7 +142,7 @@ def create_kline_chart(
             name="卖出", coord=[date_str, price], value="卖出",
             symbol="triangle", symbol_rotate=180, symbol_size=26,
             itemstyle_opts=opts.ItemStyleOpts(
-                color=_DOWN_COLOR, border_color="#ffffff", border_width=2,
+                color=_DOWN_COLOR, border_color="#fff", border_width=3,
             ),
             label_opts=opts.LabelOpts(is_show=True, position="bottom", font_size=11,
                                       font_weight="bold", color=_DOWN_COLOR, distance=8),
@@ -162,8 +162,8 @@ def create_kline_chart(
                 title=title, pos_left="left", pos_top="2%",
                 title_textstyle_opts=opts.TextStyleOpts(font_size=18, font_weight="bold", color=_TITLE_COLOR),
             ),
-            xaxis_opts=_dark_axis_opts(),
-            yaxis_opts=_dark_yaxis(is_scale=True),
+            xaxis_opts=_axis_opts(),
+            yaxis_opts=_yaxis(is_scale=True),
             legend_opts=opts.LegendOpts(
                 pos_top="2%", pos_left="center",
                 textstyle_opts=opts.TextStyleOpts(color=_AXIS_LABEL_COLOR),
@@ -252,8 +252,8 @@ def create_macd_chart(dates: list[str], dif: list, dea: list, macd_hist: list) -
                 title="MACD (12, 26, 9)", pos_left="left", pos_top="2%",
                 title_textstyle_opts=opts.TextStyleOpts(font_size=16, font_weight="bold", color=_TITLE_COLOR),
             ),
-            xaxis_opts=_dark_axis_opts(show_split=False),
-            yaxis_opts=_dark_yaxis_compact(),
+            xaxis_opts=_axis_opts(show_split=False),
+            yaxis_opts=_yaxis_compact(),
             legend_opts=opts.LegendOpts(
                 pos_top="2%", pos_left="center",
                 textstyle_opts=opts.TextStyleOpts(color=_AXIS_LABEL_COLOR),
@@ -310,8 +310,8 @@ def create_kdj_chart(dates: list[str], k_vals: list, d_vals: list, j_vals: list)
                 title="KDJ (9, 3, 3)", pos_left="left", pos_top="2%",
                 title_textstyle_opts=opts.TextStyleOpts(font_size=16, font_weight="bold", color=_TITLE_COLOR),
             ),
-            xaxis_opts=_dark_axis_opts(show_split=False),
-            yaxis_opts=_dark_yaxis_compact(y_min=0, y_max=100),
+            xaxis_opts=_axis_opts(show_split=False),
+            yaxis_opts=_yaxis_compact(),
             legend_opts=opts.LegendOpts(
                 pos_top="2%", pos_left="center",
                 textstyle_opts=opts.TextStyleOpts(color=_AXIS_LABEL_COLOR),
@@ -365,8 +365,8 @@ def create_volume_chart(dates: list[str], ohlc: list[list[float]], volumes: list
                 title="成交量", pos_left="left", pos_top="2%",
                 title_textstyle_opts=opts.TextStyleOpts(font_size=16, font_weight="bold", color=_TITLE_COLOR),
             ),
-            xaxis_opts=_dark_axis_opts(show_split=False),
-            yaxis_opts=_dark_yaxis_compact(y_name="成交量"),
+            xaxis_opts=_axis_opts(show_split=False),
+            yaxis_opts=_yaxis_compact(y_name="成交量"),
             legend_opts=opts.LegendOpts(is_show=False),
             tooltip_opts=opts.TooltipOpts(trigger="axis"),
             datazoom_opts=[
@@ -403,8 +403,8 @@ def create_rsi_chart(dates: list[str], rsi_vals: list) -> Grid:
                 title="RSI (14)", pos_left="left", pos_top="2%",
                 title_textstyle_opts=opts.TextStyleOpts(font_size=16, font_weight="bold", color=_TITLE_COLOR),
             ),
-            xaxis_opts=_dark_axis_opts(show_split=False),
-            yaxis_opts=_dark_yaxis_compact(y_min=0, y_max=100),
+            xaxis_opts=_axis_opts(show_split=False),
+            yaxis_opts=_yaxis_compact(y_min=0, y_max=100),
             legend_opts=opts.LegendOpts(
                 pos_top="2%", pos_left="center",
                 textstyle_opts=opts.TextStyleOpts(color=_AXIS_LABEL_COLOR),

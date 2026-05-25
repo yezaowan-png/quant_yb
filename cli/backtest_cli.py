@@ -2,7 +2,14 @@
 
 import os
 import time
-from concurrent.futures import ProcessPoolExecutor, as_completed
+
+# ---- 必须在 import numpy/pandas 之前设置，防止 ProcessPoolExecutor
+#      spawn 的子进程里 OpenBLAS 多线程耗尽内存 ----
+for _key in ("OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "OMP_NUM_THREADS",
+             "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
+    os.environ.setdefault(_key, "1")
+
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Optional
 
@@ -65,13 +72,7 @@ def _build_strategy_params(symbol: str, extra: dict) -> dict:
 # ============================================================
 
 def _report_worker(task: dict) -> Optional[dict]:
-    """进程级报告生成 worker：加载数据 → 生成 HTML → 返回状态"""
-    import sys as _sys
-    _sys.stdout = open(os.devnull, "w")
-    _sys.stderr = open(os.devnull, "w")
-    for key in ("OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "OMP_NUM_THREADS",
-                "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
-        os.environ[key] = "1"
+    """线程级报告生成 worker：加载数据 → 生成 HTML → 返回状态"""
 
     try:
         sym = task["symbol"]
@@ -116,7 +117,7 @@ def _run_batch_reports(pairs: list[tuple[str, str, Path]], config: dict) -> tupl
         for sym, strat, lp in pairs
     ]
 
-    click.echo(f"  并行生成报告 (进程数: {workers}, 共 {len(pairs)} 个)")
+    click.echo(f"  并行生成报告 (线程数: {workers}, 共 {len(pairs)} 个)")
 
     success = 0
     failed = 0
@@ -124,10 +125,7 @@ def _run_batch_reports(pairs: list[tuple[str, str, Path]], config: dict) -> tupl
     completed = 0
     total = len(pairs)
 
-    try:
-        executor = ProcessPoolExecutor(max_workers=workers, max_tasks_per_child=100)
-    except TypeError:
-        executor = ProcessPoolExecutor(max_workers=workers)
+    executor = ThreadPoolExecutor(max_workers=workers)
 
     with executor as ex:
         futures = {ex.submit(_report_worker, t): t["symbol"] for t in tasks}
@@ -199,8 +197,6 @@ def run_backtest(
             return
         click.echo(f"未指定股票，将对全部 {len(sym_list)} 只已缓存股票进行批量回测。")
         click.echo(f"建议先指定单只股票测试: python main.py backtest run --strategy rsi --symbol 000001.SZ")
-        if not click.confirm("确认批量回测全部股票?", default=False):
-            return
 
     # Load data
     data_map = {}
