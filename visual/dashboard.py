@@ -88,7 +88,7 @@ def _read_index_snapshot(cache_path: Path) -> dict[str, Any]:
     if not cache_path.exists():
         return {"cache_exists": False}
     try:
-        df = pd.read_csv(cache_path)
+        df = pd.read_csv(cache_path, dtype={"date": str})
     except Exception:
         return {"cache_exists": True, "read_error": True}
     if df.empty:

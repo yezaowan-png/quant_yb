@@ -170,6 +170,8 @@ class ProjectContractsTest(unittest.TestCase):
             self.assertIn("策略排行榜", html)
             self.assertIn("最近实验", html)
             self.assertIn("风险提示", html)
+            self.assertIn("20260102", html)
+            self.assertNotIn("20260102.0", html)
 
 
 if __name__ == "__main__":
