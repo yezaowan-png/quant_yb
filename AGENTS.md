@@ -68,19 +68,22 @@
 
 ## 运行和验证命令
 
-- 安装依赖：`pip install -r requirements.txt`
-- 进入交互式 REPL：`python main.py`
-- 下载数据：`python main.py data download --symbol 000001.SZ --start 20210101 --end 20231231`
-- 单标的回测：`python main.py backtest run --strategy sma_cross --symbol 000001.SZ`
-- 多标的回测：`python main.py backtest run --strategy sma_cross --symbols "000001.SZ,600519.SH"`
-- 扫描买点：`python main.py backtest scan --strategy sma_cross --days 5`
-- 生成单标的报告：`python main.py backtest report --symbol 000001.SZ --strategy sma_cross`
-- 策略对比：`python main.py backtest compare --symbol 000001.SZ`
-- 单策略统计：`python main.py stats analyze --strategy rsi`
-- 多策略统计对比：`python main.py stats compare`
-- 流水线执行：`python main.py run "download; backtest --strategy rsi; report; stats compare"`
-- 自动化测试命令：`python -m unittest discover -s tests`
-- 语法检查命令：`python -m compileall main.py cli data engine strategy visual analysis`
+- 项目对齐的 Python 环境固定为：`E:\anaconda3\envs\QYTX\python.exe`。除非只是检查系统工具，项目命令、单测、编译、报告生成和数据处理都必须使用这个解释器，不得使用裸 `python` 或系统 `C:\Python314`。
+- 每轮验证前先运行环境哨兵：`E:\anaconda3\envs\QYTX\python.exe scripts/verify_env.py`。如果该命令失败，先停止并修正环境，不要继续解释测试结果。
+- Playwright 浏览器查看可以继续使用系统已有的 `playwright` CLI；但生成 HTML、运行项目代码和单元测试必须由 QYTX 执行。
+- 安装依赖：`E:\anaconda3\envs\QYTX\python.exe -m pip install -r requirements.txt`
+- 进入交互式 REPL：`E:\anaconda3\envs\QYTX\python.exe main.py`
+- 下载数据：`E:\anaconda3\envs\QYTX\python.exe main.py data download --symbol 000001.SZ --start 20210101 --end 20231231`
+- 单标的回测：`E:\anaconda3\envs\QYTX\python.exe main.py backtest run --strategy sma_cross --symbol 000001.SZ`
+- 多标的回测：`E:\anaconda3\envs\QYTX\python.exe main.py backtest run --strategy sma_cross --symbols "000001.SZ,600519.SH"`
+- 扫描买点：`E:\anaconda3\envs\QYTX\python.exe main.py backtest scan --strategy sma_cross --days 5`
+- 生成单标的报告：`E:\anaconda3\envs\QYTX\python.exe main.py backtest report --symbol 000001.SZ --strategy sma_cross`
+- 策略对比：`E:\anaconda3\envs\QYTX\python.exe main.py backtest compare --symbol 000001.SZ`
+- 单策略统计：`E:\anaconda3\envs\QYTX\python.exe main.py stats analyze --strategy rsi`
+- 多策略统计对比：`E:\anaconda3\envs\QYTX\python.exe main.py stats compare`
+- 流水线执行：`E:\anaconda3\envs\QYTX\python.exe main.py run "download; backtest --strategy rsi; report; stats compare"`
+- 自动化测试命令：`E:\anaconda3\envs\QYTX\python.exe -m unittest discover -s tests`
+- 语法检查命令：`E:\anaconda3\envs\QYTX\python.exe -m compileall main.py cli data engine strategy visual analysis decision`
 - 格式化/静态检查命令：待确认。当前未发现 Ruff、Black、Mypy 或 pre-commit 配置。
 
 ## 回测报告输出要求
