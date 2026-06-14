@@ -23,14 +23,38 @@ class EquityCurveAnalyzer(bt.Analyzer):
     def __init__(self):
         self.equity: list[float] = []
         self.dates: list[str] = []
+        self.cash: list[float] = []
+        self.position_size: list[int] = []
+        self.position_price: list[float] = []
+        self.position_value: list[float] = []
+        self.exposure_pct: list[float] = []
         super().__init__()
 
     def next(self):
-        self.equity.append(self.strategy.broker.getvalue())
+        equity = self.strategy.broker.getvalue()
+        cash = self.strategy.broker.getcash()
+        pos = self.strategy.getposition(self.data)
+        close = float(self.data.close[0])
+        position_value = float(pos.size) * close
+
         self.dates.append(self.data.datetime.date(0).strftime("%Y-%m-%d"))
+        self.equity.append(equity)
+        self.cash.append(cash)
+        self.position_size.append(int(pos.size))
+        self.position_price.append(float(pos.price or 0))
+        self.position_value.append(position_value)
+        self.exposure_pct.append(position_value / equity * 100 if equity else 0.0)
 
     def get_analysis(self):
-        return {"dates": self.dates, "equity": self.equity}
+        return {
+            "dates": self.dates,
+            "equity": self.equity,
+            "cash": self.cash,
+            "position_size": self.position_size,
+            "position_price": self.position_price,
+            "position_value": self.position_value,
+            "exposure_pct": self.exposure_pct,
+        }
 
 
 def compute_drawdowns(equity: list[float]) -> list[float]:
@@ -158,7 +182,13 @@ class BacktestRunner:
         self.commission = config["backtest"]["commission"]
         self.stamp_duty = config["backtest"]["stamp_duty"]
         self.min_comm = config["backtest"].get("min_commission", 5.0)
+        self.slippage_perc = config["backtest"].get("slippage_perc", 0.001)
+        self.enforce_price_limits = config["backtest"].get("enforce_price_limits", True)
+        self.limit_pct = config["backtest"].get("limit_pct", 0.10)
+        self.volume_limit_ratio = config["backtest"].get("volume_limit_ratio", 0.0)
+        self.volume_unit = config["backtest"].get("volume_unit", 100)
         self._max_workers = config.get("parallel", {}).get("backtest_workers", 12)
+        self._benchmark_df: Optional[pd.DataFrame] = None
 
     def run(
         self,
@@ -200,9 +230,16 @@ class BacktestRunner:
             min_commission=self.min_comm,
         )
         cerebro.broker.addcommissioninfo(comm_info)
-        cerebro.broker.set_slippage_perc(0.001)
+        cerebro.broker.set_slippage_perc(self.slippage_perc)
 
         params = strategy_params or {}
+        params = {
+            **params,
+            "enforce_price_limits": self.enforce_price_limits,
+            "limit_pct": self.limit_pct,
+            "volume_limit_ratio": self.volume_limit_ratio,
+            "volume_unit": self.volume_unit,
+        }
         cerebro.addstrategy(strategy_cls, **params)
 
         cerebro.addanalyzer(bt.analyzers.TradeAnalyzer, _name="trades")
@@ -224,7 +261,7 @@ class BacktestRunner:
         equity_data = strat.analyzers.equity.get_analysis()
         equity_data["drawdowns"] = compute_drawdowns(equity_data["equity"])
 
-        stats = self._build_stats(strat, final_value)
+        stats = self._build_stats(strat, final_value, equity_data, df)
 
         return {
             "trade_records": strat.get_trade_records(),
@@ -234,7 +271,7 @@ class BacktestRunner:
         }
 
     # ------------------------------------------------------------
-    #  批量回测 / 扫描（ThreadPoolExecutor）
+    #  批量回测 / 扫描（ProcessPoolExecutor）
     # ------------------------------------------------------------
 
     def run_batch(
@@ -380,30 +417,116 @@ class BacktestRunner:
     #  工具方法
     # ------------------------------------------------------------
 
-    def _build_stats(self, strat: bt.Strategy, final_value: float) -> dict[str, Any]:
+    def _load_benchmark_df(self) -> Optional[pd.DataFrame]:
+        benchmark_cfg = self.config.get("benchmark", {})
+        if not benchmark_cfg.get("enabled", True):
+            return None
+        if self._benchmark_df is not None:
+            return self._benchmark_df
+
+        symbol = benchmark_cfg.get("symbol")
+        if not symbol:
+            return None
+        path = Path(self.config["data"]["cache_dir"]) / f"{symbol}.csv"
+        if not path.exists():
+            return None
+        df = pd.read_csv(path, dtype={"date": str})
+        df["date"] = pd.to_datetime(df["date"])
+        self._benchmark_df = df.sort_values("date").reset_index(drop=True)
+        return self._benchmark_df
+
+    def _benchmark_metrics(self, equity_data: dict, data_df: pd.DataFrame) -> dict[str, Any]:
+        benchmark_df = self._load_benchmark_df()
+        if benchmark_df is None or not equity_data.get("dates"):
+            return {}
+
+        start_date = pd.Timestamp(data_df["date"].min())
+        end_date = pd.Timestamp(data_df["date"].max())
+        sub = benchmark_df[
+            (benchmark_df["date"] >= start_date) & (benchmark_df["date"] <= end_date)
+        ].copy()
+        if len(sub) < 2:
+            return {}
+
+        benchmark_return = (sub["close"].iloc[-1] / sub["close"].iloc[0] - 1) * 100
+        strategy_return = (equity_data["equity"][-1] / equity_data["equity"][0] - 1) * 100
+
+        eq = pd.DataFrame({
+            "date": pd.to_datetime(equity_data["dates"]),
+            "equity": equity_data["equity"],
+        }).set_index("date")
+        bm = sub.set_index("date")["close"]
+        joined = pd.concat([
+            eq["equity"].pct_change().rename("strategy"),
+            bm.pct_change().rename("benchmark"),
+        ], axis=1).dropna()
+
+        info_ratio = 0.0
+        if len(joined) > 2:
+            active = joined["strategy"] - joined["benchmark"]
+            active_std = active.std()
+            if active_std and not pd.isna(active_std):
+                info_ratio = float(active.mean() / active_std * np.sqrt(252))
+
+        symbol = self.config.get("benchmark", {}).get("symbol", "")
+        return {
+            "benchmark_symbol": symbol,
+            "benchmark_return_pct": round(float(benchmark_return), 2),
+            "excess_return_pct": round(float(strategy_return - benchmark_return), 2),
+            "information_ratio": round(info_ratio, 4),
+        }
+
+    def _build_stats(
+        self,
+        strat: bt.Strategy,
+        final_value: float,
+        equity_data: dict,
+        data_df: pd.DataFrame,
+    ) -> dict[str, Any]:
         ta = strat.analyzers.trades.get_analysis()
         sharpe = strat.analyzers.sharpe.get_analysis()
         dd = strat.analyzers.drawdown.get_analysis()
 
         total_return = (final_value - self.cash) / self.cash * 100
+        trading_days = len(equity_data.get("equity", []))
+        annual_return = 0.0
+        annual_volatility = 0.0
+        calmar = 0.0
+        if trading_days > 0 and final_value > 0:
+            annual_return = ((final_value / self.cash) ** (252 / trading_days) - 1) * 100
+        eq_series = pd.Series(equity_data.get("equity", []), dtype="float64")
+        if len(eq_series) > 2:
+            daily_returns = eq_series.pct_change().dropna()
+            annual_volatility = float(daily_returns.std() * np.sqrt(252) * 100)
 
         won = ta.get("won", {}).get("total", 0)
         lost = ta.get("lost", {}).get("total", 0)
         total_trades = won + lost
         win_rate = (won / total_trades * 100) if total_trades > 0 else 0.0
+        max_drawdown = dd.get("max", {}).get("drawdown", 0)
+        if max_drawdown:
+            calmar = annual_return / max_drawdown
 
-        return {
+        stats = {
             "initial_cash": self.cash,
             "final_value": round(final_value, 2),
             "total_return_pct": round(total_return, 2),
+            "annual_return_pct": round(annual_return, 2),
+            "annual_volatility_pct": round(annual_volatility, 2),
+            "calmar_ratio": round(calmar, 4),
             "total_trades": total_trades,
             "win_trades": won,
             "lose_trades": lost,
             "win_rate_pct": round(win_rate, 2),
             "sharpe_ratio": round(sharpe.get("sharperatio", 0) or 0, 4),
-            "max_drawdown_pct": round(dd.get("max", {}).get("drawdown", 0), 2),
+            "max_drawdown_pct": round(max_drawdown, 2),
             "max_drawdown_days": dd.get("max", {}).get("len", 0),
+            "start_date": data_df["date"].min().strftime("%Y-%m-%d"),
+            "end_date": data_df["date"].max().strftime("%Y-%m-%d"),
+            "trading_days": trading_days,
         }
+        stats.update(self._benchmark_metrics(equity_data, data_df))
+        return stats
 
     def _export_trade_log(
         self, records: list[dict], trades_dir: Path, symbol: str, strategy_name: str,

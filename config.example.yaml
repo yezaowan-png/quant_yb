@@ -9,6 +9,43 @@ backtest:
   commission: 0.00025        # 佣金费率 0.025%
   stamp_duty: 0.001          # 印花税 0.1% (仅卖出)
   min_commission: 5.0        # 最低佣金 5 元
+  slippage_perc: 0.001       # 滑点比例，0.001 = 0.1%
+  enforce_price_limits: true # 模拟涨跌停限制，涨停不买、跌停不卖
+  limit_pct: 0.10            # 普通 A 股涨跌停幅度；创业板/科创板可按需改为 0.20
+  volume_limit_ratio: 0.02   # 单笔成交不超过当日成交量的比例；0 表示不限制
+  volume_unit: 100           # Tushare vol 单位为手，1 手 = 100 股
+
+benchmark:
+  enabled: true
+  symbol: "000300.SH"        # 基准指数缓存文件存在时用于计算超额收益/信息比率
+
+index_overview:
+  default_symbol: "000001.SH" # 默认指数概览标的：上证指数
+  indexes:
+    - symbol: "000001.SH"
+      name: "上证指数"
+      market: "SH"
+    - symbol: "399001.SZ"
+      name: "深证成指"
+      market: "SZ"
+    - symbol: "399006.SZ"
+      name: "创业板指"
+      market: "SZ"
+    - symbol: "000688.SH"
+      name: "科创50"
+      market: "SH"
+    - symbol: "000300.SH"
+      name: "沪深300"
+      market: "SH"
+    - symbol: "000905.SH"
+      name: "中证500"
+      market: "SH"
+    - symbol: "000852.SH"
+      name: "中证1000"
+      market: "SH"
+    - symbol: "000985.SH"
+      name: "中证全指"
+      market: "SH"
 
 rate_limit:
   calls_per_minute: 500
@@ -17,6 +54,7 @@ output:
   trades_dir: "output/trades"
   reports_dir: "output/reports"
   signals_dir: "output/signals"
+  statistics_dir: "output/statistics"
 
 parallel:
   download_workers: 5

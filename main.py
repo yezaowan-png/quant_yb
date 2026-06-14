@@ -14,6 +14,8 @@ import click
 from cli.data_cli import data_group
 from cli.backtest_cli import backtest_group
 from cli.stats_cli import stats_group
+from cli.index_cli import index_group
+from cli.dashboard_cli import dashboard_command
 
 
 @click.group(invoke_without_command=True)
@@ -70,6 +72,8 @@ def run_pipeline(commands: str, file_path: str):
 cli.add_command(data_group)
 cli.add_command(backtest_group)
 cli.add_command(stats_group)
+cli.add_command(index_group)
+cli.add_command(dashboard_command)
 
 
 if __name__ == "__main__":

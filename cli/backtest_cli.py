@@ -18,6 +18,7 @@ import pandas as pd
 import yaml
 
 from engine.runner import BacktestRunner, load_strategy_class
+from strategy.base import normalize_strategy_params
 from visual.report import generate_report
 
 
@@ -58,12 +59,25 @@ def _list_strategies() -> list[str]:
     return sorted(names)
 
 
-def _build_strategy_params(symbol: str, extra: dict) -> dict:
-    """Build params dict from CLI options."""
-    params = {"symbol": symbol}
-    for k, v in extra.items():
-        if v is not None:
-            params[k] = v
+def _strategy_names_by_length() -> list[str]:
+    return sorted(_list_strategies(), key=len, reverse=True)
+
+
+def _split_trade_log_name(name: str) -> Optional[tuple[str, str]]:
+    for strategy_name in _strategy_names_by_length():
+        suffix = f"_{strategy_name}"
+        if name.endswith(suffix):
+            symbol = name[:-len(suffix)]
+            if symbol:
+                return symbol, strategy_name
+    return None
+
+
+def _build_strategy_params(strategy_cls, symbol: str, extra: dict) -> dict:
+    """Build params dict from the selected strategy's declared schema."""
+    params, ignored = normalize_strategy_params(strategy_cls, extra, symbol)
+    if ignored:
+        click.echo(f"提示: 当前策略不使用这些参数，已忽略: {', '.join(ignored)}")
     return params
 
 
@@ -175,11 +189,28 @@ def backtest_group():
 @click.option("--devfactor", default=None, type=float, help="标准差倍数 (bollinger)")
 @click.option("--k-period", default=None, type=int, help="KDJ K线周期")
 @click.option("--smooth", default=None, type=int, help="KDJ 平滑参数")
+@click.option("--lookback", default=None, type=int, help="平台突破回看周期 (volume_platform_breakout)")
+@click.option("--max-range-pct", default=None, type=float, help="平台最大振幅 (volume_platform_breakout)")
+@click.option("--touch-tolerance", default=None, type=float, help="平台上下沿触碰容忍度")
+@click.option("--min-upper-touches", default=None, type=int, help="平台上沿最少触碰次数")
+@click.option("--min-lower-touches", default=None, type=int, help="平台下沿最少触碰次数")
+@click.option("--breakout-pct", default=None, type=float, help="突破确认幅度")
+@click.option("--volume-period", default=None, type=int, help="均量周期")
+@click.option("--volume-multiplier", default=None, type=float, help="放量倍数")
+@click.option("--ma-slope-days", default=None, type=int, help="MA20 向上确认天数")
+@click.option("--platform-sell-tolerance", default=None, type=float, help="跌破平台上沿卖出容忍度")
+@click.option("--stop-loss-pct", default=None, type=float, help="买入价止损比例")
 def run_backtest(
     strategy: str, symbol: Optional[str], symbols: Optional[str],
     fast: Optional[int], slow: Optional[int], period: Optional[int],
     signal_period: Optional[int], oversold: Optional[int], overbought: Optional[int],
     devfactor: Optional[float], k_period: Optional[int], smooth: Optional[int],
+    lookback: Optional[int], max_range_pct: Optional[float],
+    touch_tolerance: Optional[float], min_upper_touches: Optional[int],
+    min_lower_touches: Optional[int], breakout_pct: Optional[float],
+    volume_period: Optional[int], volume_multiplier: Optional[float],
+    ma_slope_days: Optional[int], platform_sell_tolerance: Optional[float],
+    stop_loss_pct: Optional[float],
 ):
     """运行策略回测，导出交易流水 CSV"""
     config = _load_config()
@@ -210,12 +241,24 @@ def run_backtest(
         click.echo("没有可用的数据。", err=True)
         return
 
+    cls = load_strategy_class(strategy)
+
     # Strategy params
-    strategy_params = _build_strategy_params("", {
+    strategy_params = _build_strategy_params(cls, "", {
         "fast_period": fast, "slow_period": slow, "period": period,
         "signal_period": signal_period, "oversold": oversold,
         "overbought": overbought, "devfactor": devfactor,
         "k_period": k_period, "smooth": smooth,
+        "lookback": lookback, "max_range_pct": max_range_pct,
+        "touch_tolerance": touch_tolerance,
+        "min_upper_touches": min_upper_touches,
+        "min_lower_touches": min_lower_touches,
+        "breakout_pct": breakout_pct,
+        "volume_period": volume_period,
+        "volume_multiplier": volume_multiplier,
+        "ma_slope_days": ma_slope_days,
+        "platform_sell_tolerance": platform_sell_tolerance,
+        "stop_loss_pct": stop_loss_pct,
     })
 
     if len(data_map) == 1:
@@ -223,7 +266,6 @@ def run_backtest(
         sym = list(data_map.keys())[0]
         strategy_params["symbol"] = sym
         df = data_map[sym]
-        cls = load_strategy_class(strategy)
         result = runner.run(df, cls, strategy_params)
 
         # Export trade log and equity
@@ -236,6 +278,11 @@ def run_backtest(
         stats = result["stats"]
         click.echo(f"\n--- 绩效摘要 [{sym}] ---")
         click.echo(f"  总收益率:    {stats['total_return_pct']}%")
+        click.echo(f"  年化收益率:  {stats['annual_return_pct']}%")
+        click.echo(f"  年化波动率:  {stats['annual_volatility_pct']}%")
+        if "excess_return_pct" in stats:
+            click.echo(f"  超额收益率:  {stats['excess_return_pct']}%")
+            click.echo(f"  信息比率:    {stats['information_ratio']}")
         click.echo(f"  夏普比率:    {stats['sharpe_ratio']}")
         click.echo(f"  最大回撤:    {stats['max_drawdown_pct']}%")
         click.echo(f"  交易次数:    {stats['total_trades']}")
@@ -258,11 +305,28 @@ def run_backtest(
 @click.option("--devfactor", default=None, type=float, help="标准差倍数 (bollinger)")
 @click.option("--k-period", default=None, type=int, help="KDJ K线周期")
 @click.option("--smooth", default=None, type=int, help="KDJ 平滑参数")
+@click.option("--lookback", default=None, type=int, help="平台突破回看周期 (volume_platform_breakout)")
+@click.option("--max-range-pct", default=None, type=float, help="平台最大振幅 (volume_platform_breakout)")
+@click.option("--touch-tolerance", default=None, type=float, help="平台上下沿触碰容忍度")
+@click.option("--min-upper-touches", default=None, type=int, help="平台上沿最少触碰次数")
+@click.option("--min-lower-touches", default=None, type=int, help="平台下沿最少触碰次数")
+@click.option("--breakout-pct", default=None, type=float, help="突破确认幅度")
+@click.option("--volume-period", default=None, type=int, help="均量周期")
+@click.option("--volume-multiplier", default=None, type=float, help="放量倍数")
+@click.option("--ma-slope-days", default=None, type=int, help="MA20 向上确认天数")
+@click.option("--platform-sell-tolerance", default=None, type=float, help="跌破平台上沿卖出容忍度")
+@click.option("--stop-loss-pct", default=None, type=float, help="买入价止损比例")
 def scan_buy_signals(
     strategy: str, days: int,
     fast: Optional[int], slow: Optional[int], period: Optional[int],
     signal_period: Optional[int], oversold: Optional[int], overbought: Optional[int],
     devfactor: Optional[float], k_period: Optional[int], smooth: Optional[int],
+    lookback: Optional[int], max_range_pct: Optional[float],
+    touch_tolerance: Optional[float], min_upper_touches: Optional[int],
+    min_lower_touches: Optional[int], breakout_pct: Optional[float],
+    volume_period: Optional[int], volume_multiplier: Optional[float],
+    ma_slope_days: Optional[int], platform_sell_tolerance: Optional[float],
+    stop_loss_pct: Optional[float],
 ):
     """扫描近N日存在买点的股票，汇总导出"""
     config = _load_config()
@@ -283,11 +347,22 @@ def scan_buy_signals(
         return
 
     runner = BacktestRunner(config)
-    strategy_params = _build_strategy_params("", {
+    cls = load_strategy_class(strategy)
+    strategy_params = _build_strategy_params(cls, "", {
         "fast_period": fast, "slow_period": slow, "period": period,
         "signal_period": signal_period, "oversold": oversold,
         "overbought": overbought, "devfactor": devfactor,
         "k_period": k_period, "smooth": smooth,
+        "lookback": lookback, "max_range_pct": max_range_pct,
+        "touch_tolerance": touch_tolerance,
+        "min_upper_touches": min_upper_touches,
+        "min_lower_touches": min_lower_touches,
+        "breakout_pct": breakout_pct,
+        "volume_period": volume_period,
+        "volume_multiplier": volume_multiplier,
+        "ma_slope_days": ma_slope_days,
+        "platform_sell_tolerance": platform_sell_tolerance,
+        "stop_loss_pct": stop_loss_pct,
     })
     click.echo(f"扫描 {len(data_map)} 只股票，回看 {days} 日 ...")
     results = runner.scan_recent_buy_signals(
@@ -315,18 +390,8 @@ def compare_strategies(symbol: str):
         click.echo(f"错误: {e}", err=True)
         return
 
-    strategies = _list_strategies()
     runner = BacktestRunner(config)
-
-    # Default params for each strategy
-    strategy_configs = [
-        ("sma_cross", {"fast_period": 5, "slow_period": 20}),
-        ("macd_cross", {"fast_period": 12, "slow_period": 26, "signal_period": 9}),
-        ("kdj", {"k_period": 9, "smooth": 3, "oversold": 20, "overbought": 80}),
-        ("bollinger", {"period": 20, "devfactor": 2.0}),
-        ("rsi", {"period": 14, "oversold": 30, "overbought": 70}),
-        ("single_ma", {"period": 20}),
-    ]
+    strategies = _list_strategies()
 
     click.echo(f"\n{'='*80}")
     click.echo(f"  策略对比 — {sym}")
@@ -335,8 +400,8 @@ def compare_strategies(symbol: str):
     click.echo("-" * 64)
 
     results_list = []
-    for strategy_name, params in strategy_configs:
-        params["symbol"] = sym
+    for strategy_name in strategies:
+        params = {"symbol": sym}
         cls = load_strategy_class(strategy_name)
         result = runner.run(df, cls, params, verbose=False)
         stats = result["stats"]
@@ -388,18 +453,12 @@ def _find_trade_logs(trades_dir: Path, symbol: Optional[str] = None, strategy: O
             continue
         if "_" not in name:
             continue
-        # Find the split point: strategy is after the last underscore pattern
-        # symbol can contain underscores (e.g. 000001.SZ has none, but symbol format is consistent)
-        # Strategy names: sma_cross, macd_cross, kdj, bollinger, rsi, single_ma
-        parts = name.split("_")
-        # Try to find where strategy name starts
-        for i in range(1, len(parts)):
-            candidate_strategy = "_".join(parts[i:])
-            candidate_symbol = "_".join(parts[:i])
-            if candidate_strategy in ("sma_cross", "macd_cross", "kdj", "bollinger", "rsi", "single_ma"):
-                if (symbol is None or candidate_symbol == symbol) and (strategy is None or candidate_strategy == strategy):
-                    results.append((candidate_symbol, candidate_strategy, p))
-                break
+        split = _split_trade_log_name(name)
+        if split is None:
+            continue
+        candidate_symbol, candidate_strategy = split
+        if (symbol is None or candidate_symbol == symbol) and (strategy is None or candidate_strategy == strategy):
+            results.append((candidate_symbol, candidate_strategy, p))
     return results
 
 

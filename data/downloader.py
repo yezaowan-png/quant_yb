@@ -59,11 +59,26 @@ class DataDownloader:
         "vol": "volume",
         "amount": "amount",
     }
+    INDEX_COLUMN_MAP = {
+        "ts_code": "ts_code",
+        "trade_date": "date",
+        "open": "open",
+        "high": "high",
+        "low": "low",
+        "close": "close",
+        "pre_close": "pre_close",
+        "change": "change",
+        "pct_chg": "pct_chg",
+        "vol": "volume",
+        "amount": "amount",
+    }
 
     def __init__(self, config: Optional[dict] = None):
         self.config = config or load_config()
         self.cache_dir = Path(self.config["data"]["cache_dir"])
         self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self.index_cache_dir = self.cache_dir / "index"
+        self.index_cache_dir.mkdir(parents=True, exist_ok=True)
 
         token = self.config["tushare"]["token"]
         ts.set_token(token)
@@ -76,6 +91,15 @@ class DataDownloader:
     def _cache_path(self, symbol: str) -> Path:
         return self.cache_dir / f"{symbol}.csv"
 
+    def _index_cache_path(self, symbol: str) -> Path:
+        return self.index_cache_dir / f"{symbol}.csv"
+
+    def _is_index_symbol(self, symbol: str) -> bool:
+        code, _, market = symbol.partition(".")
+        return (market == "SH" and code.startswith("000")) or (
+            market == "SZ" and code.startswith("399")
+        )
+
     def _load_cache(self, symbol: str) -> Optional[pd.DataFrame]:
         """加载本地缓存，不存在返回 None"""
         path = self._cache_path(symbol)
@@ -87,10 +111,35 @@ class DataDownloader:
         df["date"] = pd.to_datetime(df["date"])
         return df.sort_values("date").reset_index(drop=True)
 
+    def load_index_cache(self, symbol: str) -> Optional[pd.DataFrame]:
+        """加载指数缓存，优先读取 data/cache/index，兼容旧的根目录缓存。"""
+        path = self._index_cache_path(symbol)
+        if not path.exists():
+            legacy_path = self._cache_path(symbol)
+            path = legacy_path if legacy_path.exists() else path
+        if not path.exists():
+            return None
+        df = pd.read_csv(path, dtype={"date": str, "ts_code": str})
+        if df.empty:
+            return None
+        df["date"] = pd.to_datetime(df["date"])
+        return df.sort_values("date").reset_index(drop=True)
+
     def _save_cache(self, symbol: str, df: pd.DataFrame) -> None:
         """保存到本地 CSV，去重排序，日期统一存为 YYYYMMDD 格式"""
         path = self._cache_path(symbol)
         existing = self._load_cache(symbol)
+        if existing is not None:
+            df = pd.concat([existing, df], ignore_index=True)
+        df = df.drop_duplicates(subset=["date"]).sort_values("date")
+        df_to_save = df.copy()
+        df_to_save["date"] = df_to_save["date"].dt.strftime("%Y%m%d")
+        df_to_save.to_csv(path, index=False)
+
+    def _save_index_cache(self, symbol: str, df: pd.DataFrame) -> None:
+        """保存指数 CSV 到 data/cache/index/{symbol}.csv。"""
+        path = self._index_cache_path(symbol)
+        existing = self.load_index_cache(symbol)
         if existing is not None:
             df = pd.concat([existing, df], ignore_index=True)
         df = df.drop_duplicates(subset=["date"]).sort_values("date")
@@ -168,16 +217,80 @@ class DataDownloader:
 
         return df
 
+    def download_index(
+        self,
+        symbol: str = "000001.SH",
+        start: str = "20210101",
+        end: Optional[str] = None,
+        force: bool = False,
+    ) -> pd.DataFrame:
+        """下载单个指数日线，使用 Tushare index_daily 接口。"""
+        end = end or today_str()
+        symbol = symbol.upper()
+        if not force:
+            cached = self.load_index_cache(symbol)
+            if cached is not None:
+                cached_start = cached["date"].min().strftime("%Y%m%d")
+                cached_end = cached["date"].max().strftime("%Y%m%d")
+
+                if cached_start <= start and cached_end >= end:
+                    mask = (cached["date"] >= pd.Timestamp(start)) & (
+                        cached["date"] <= pd.Timestamp(end)
+                    )
+                    return cached[mask].reset_index(drop=True)
+
+        try:
+            df = self._fetch_index_from_api(symbol, start, end)
+        except Exception:
+            cached = self.load_index_cache(symbol)
+            if cached is not None:
+                mask = (cached["date"] >= pd.Timestamp(start)) & (
+                    cached["date"] <= pd.Timestamp(end)
+                )
+                return cached[mask].reset_index(drop=True)
+            raise
+
+        return df
+
+    def _fetch_index_from_api(self, symbol: str, start: str, end: str) -> pd.DataFrame:
+        """调用 Tushare index_daily 并写入指数缓存。"""
+        self._rate_limiter.wait()
+        try:
+            raw = self.pro.index_daily(
+                ts_code=symbol,
+                start_date=start,
+                end_date=end,
+                fields="ts_code,trade_date,open,high,low,close,pre_close,change,pct_chg,vol,amount",
+            )
+        except Exception as e:
+            click.echo(f"  [{symbol}] index_daily API 调用失败: {e}", err=True)
+            raise
+
+        if raw is None or raw.empty:
+            raise ValueError(f"无指数数据: {symbol}")
+
+        df = self._clean_index(raw)
+        self._save_index_cache(symbol, df)
+        return df
+
     def _fetch_from_api(self, symbol: str, start: str, end: str) -> pd.DataFrame:
         """通过限流器调用 Tushare API 并清洗存入缓存"""
         self._rate_limiter.wait()
         try:
-            raw = self.pro.daily(
-                ts_code=symbol,
-                start_date=start,
-                end_date=end,
-                fields="trade_date,open,high,low,close,vol,amount",
-            )
+            if self._is_index_symbol(symbol):
+                raw = self.pro.index_daily(
+                    ts_code=symbol,
+                    start_date=start,
+                    end_date=end,
+                    fields="trade_date,open,high,low,close,vol,amount",
+                )
+            else:
+                raw = self.pro.daily(
+                    ts_code=symbol,
+                    start_date=start,
+                    end_date=end,
+                    fields="trade_date,open,high,low,close,vol,amount",
+                )
         except Exception as e:
             click.echo(f"  [{symbol}] API 调用失败: {e}", err=True)
             raise
@@ -261,6 +374,42 @@ class DataDownloader:
 
         df["date"] = pd.to_datetime(df["date"], format="%Y%m%d")
         for col in ["open", "high", "low", "close", "volume", "amount"]:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+
+        df = df.dropna(subset=["open", "high", "low", "close"]).sort_values("date")
+        return df.reset_index(drop=True)
+
+    def _clean_index(self, raw: pd.DataFrame) -> pd.DataFrame:
+        """清洗指数日线，保留涨跌幅字段供概览分析使用。"""
+        df = raw.rename(columns=self.INDEX_COLUMN_MAP)
+        keep_cols = [
+            "ts_code",
+            "date",
+            "open",
+            "high",
+            "low",
+            "close",
+            "pre_close",
+            "change",
+            "pct_chg",
+            "volume",
+            "amount",
+        ]
+        df = df[[c for c in keep_cols if c in df.columns]]
+
+        df["date"] = pd.to_datetime(df["date"], format="%Y%m%d")
+        for col in [
+            "open",
+            "high",
+            "low",
+            "close",
+            "pre_close",
+            "change",
+            "pct_chg",
+            "volume",
+            "amount",
+        ]:
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
 

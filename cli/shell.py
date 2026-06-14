@@ -10,6 +10,7 @@ import yaml
 import pandas as pd
 
 from data.downloader import DataDownloader, today_str, default_start
+from strategy.base import normalize_strategy_params
 
 
 def _load_config() -> dict:
@@ -33,6 +34,20 @@ def _list_strategies() -> list[str]:
             continue
         names.append(p.stem)
     return sorted(names)
+
+
+def _strategy_names_by_length() -> list[str]:
+    return sorted(_list_strategies(), key=len, reverse=True)
+
+
+def _split_trade_log_name(name: str) -> Optional[tuple[str, str]]:
+    for strategy_name in _strategy_names_by_length():
+        suffix = f"_{strategy_name}"
+        if name.endswith(suffix):
+            symbol = name[:-len(suffix)]
+            if symbol:
+                return symbol, strategy_name
+    return None
 
 
 def _load_cache_df(symbol: str, config: dict) -> pd.DataFrame:
@@ -63,23 +78,11 @@ def _parse_args(args: list[str]) -> dict:
     return kwargs
 
 
-def _build_strategy_params(symbol: str, args: dict) -> dict:
+def _build_strategy_params(strategy_cls, symbol: str, args: dict) -> dict:
     """从 REPL 解析的参数构建策略参数字典。"""
-    param_keys = [
-        "fast_period", "slow_period", "period", "signal_period",
-        "oversold", "overbought", "devfactor", "k_period", "smooth",
-    ]
-    params = {"symbol": symbol}
-    for k in param_keys:
-        if k in args:
-            v = args[k]
-            try:
-                params[k] = int(v)
-            except (ValueError, TypeError):
-                try:
-                    params[k] = float(v)
-                except (ValueError, TypeError):
-                    params[k] = v
+    params, ignored = normalize_strategy_params(strategy_cls, args, symbol)
+    if ignored:
+        click.echo(f"  提示: 当前策略不使用这些参数，已忽略: {', '.join(ignored)}")
     return params
 
 
@@ -95,6 +98,13 @@ def _print_help():
     click.echo("    示例: download --start 20210101 --end 20231231")
     click.echo("          download --symbol 000001.SZ --force")
     click.echo()
+    click.echo("  index           指数数据与每日概览")
+    click.echo("    子命令: download / report / overview")
+    click.echo("    参数: --symbol (默认 000001.SH) --all --start --end --force --output")
+    click.echo("    示例: index overview --symbol 000001.SH")
+    click.echo("          index overview --all")
+    click.echo("          index report --symbol 000001.SH")
+    click.echo()
     click.echo("  backtest, bt    运行策略回测")
     click.echo("    参数: --strategy (策略名称)")
     click.echo("          --symbol (股票代码)")
@@ -104,6 +114,8 @@ def _print_help():
     click.echo("          --oversold (超卖阈值)  --overbought (超买阈值)")
     click.echo("          --devfactor (布林标准差倍数)  --k_period (KDJ周期)")
     click.echo("          --smooth (KDJ平滑参数)")
+    click.echo("          --lookback --max_range_pct --volume_multiplier (平台突破参数)")
+    click.echo("          --platform_sell_tolerance --stop_loss_pct (平台突破卖出参数)")
     click.echo(f"    可用策略: {', '.join(_list_strategies())}")
     click.echo("    示例: backtest --strategy sma_cross --symbol 000001.SZ")
     click.echo("          backtest --strategy macd_cross --symbol 000001.SZ --fast 12 --slow 26")
@@ -128,6 +140,23 @@ def _print_help():
     click.echo("    参数: --strategy (策略名称, analyze 必需)")
     click.echo("    示例: stats analyze --strategy rsi")
     click.echo("          stats compare")
+    click.echo()
+    click.echo("  dashboard       生成项目汇总导航面板")
+    click.echo("    参数: --output (输出 HTML 路径，默认 output/reports/dashboard.html)")
+    click.echo("    示例: dashboard")
+    click.echo()
+    click.secho("  放量平台突破常用命令（可直接复制）:", fg="yellow", bold=True)
+    click.echo("    1) 回测全市场:")
+    click.echo("       backtest --strategy volume_platform_breakout")
+    click.echo("    2) 生成报告:")
+    click.echo("       report --strategy volume_platform_breakout")
+    click.echo("       report --symbol 603662.SH --strategy volume_platform_breakout")
+    click.echo("    3) 生成策略画像统计:")
+    click.echo("       stats analyze --strategy volume_platform_breakout")
+    click.echo("    4) 扫描最近买点:")
+    click.echo("       scan --strategy volume_platform_breakout --days 10")
+    click.echo("    5) 一键流水线:")
+    click.echo('       run "backtest --strategy volume_platform_breakout; report --strategy volume_platform_breakout; stats analyze --strategy volume_platform_breakout"')
     click.echo()
     click.echo("  list            列出已缓存股票和可用策略")
     click.echo("  run             按顺序批量执行多条命令")
@@ -171,6 +200,86 @@ def _cmd_download(config: dict, **kwargs):
     click.secho("  下载完成。", fg="green")
 
 
+def _index_symbol_name(config: dict, symbol: str) -> str:
+    for item in config.get("index_overview", {}).get("indexes", []):
+        if item.get("symbol", "").upper() == symbol.upper():
+            return item.get("name") or symbol
+    return "上证指数" if symbol.upper() == "000001.SH" else symbol
+
+
+def _configured_index_items(config: dict) -> list[dict]:
+    indexes = config.get("index_overview", {}).get("indexes", [])
+    if indexes:
+        return indexes
+    return [{"symbol": "000001.SH", "name": "上证指数", "market": "SH"}]
+
+
+def _cmd_index(config: dict, **kwargs):
+    sub = kwargs.get("sub") or "overview"
+    all_indexes = bool(kwargs.get("all", False))
+    if all_indexes:
+        index_items = _configured_index_items(config)
+    else:
+        symbol = kwargs.get("symbol") or config.get("index_overview", {}).get("default_symbol", "000001.SH")
+        if isinstance(symbol, bool):
+            symbol = "000001.SH"
+        symbol = symbol.strip().upper()
+        index_items = [{"symbol": symbol, "name": _index_symbol_name(config, symbol)}]
+    start = kwargs.get("start", default_start())
+    end = kwargs.get("end", today_str())
+    force = bool(kwargs.get("force", False))
+    output = kwargs.get("output")
+    if isinstance(output, bool):
+        output = None
+
+    dl = DataDownloader(config)
+
+    if sub == "download":
+        click.echo(f"  日期范围: {start} ~ {end}")
+        click.echo(f"  指数数量: {len(index_items)}")
+        for item in index_items:
+            symbol = item["symbol"].upper()
+            name = item.get("name") or _index_symbol_name(config, symbol)
+            click.echo(f"  指数: {symbol} ({name})")
+            df = dl.download_index(symbol=symbol, start=start, end=end, force=force)
+            click.secho(f"  完成: {len(df)} 条指数日线，缓存文件: {dl._index_cache_path(symbol)}", fg="green")
+        return
+
+    from visual.index_report import generate_index_report
+
+    click.echo(f"  指数数量: {len(index_items)}")
+    if sub == "download":
+        pass
+    elif sub not in {"report", "overview"}:
+        click.secho("  用法: index download|report|overview --symbol 000001.SH 或 --all", fg="yellow")
+        return
+
+    for item in index_items:
+        symbol = item["symbol"].upper()
+        name = item.get("name") or _index_symbol_name(config, symbol)
+        click.echo(f"  指数: {symbol} ({name})")
+
+        if sub == "overview":
+            click.echo(f"  日期范围: {start} ~ {end}")
+            df = dl.download_index(symbol=symbol, start=start, end=end, force=force)
+        else:
+            df = dl.load_index_cache(symbol)
+            if df is None or df.empty:
+                click.secho(f"  指数缓存不存在: {symbol}，请先执行 index download --symbol {symbol}", fg="red")
+                return
+
+        if output and all_indexes:
+            out_path = Path(output) / f"{symbol}_overview.html"
+        elif output:
+            out_path = Path(output)
+        else:
+            out_path = Path(config["output"]["reports_dir"]) / "index" / f"{symbol}_overview.html"
+        generate_index_report(df, symbol=symbol, name=name, output_path=out_path)
+        click.secho(f"  报告已生成: {out_path}", fg="green")
+
+    return
+
+
 def _cmd_backtest(config: dict, **kwargs):
     strategy = kwargs.get("strategy", "sma_cross")
     symbol = kwargs.get("symbol", "")
@@ -186,7 +295,7 @@ def _cmd_backtest(config: dict, **kwargs):
 
     runner = BacktestRunner(config)
     cls = load_strategy_class(strategy)
-    params = _build_strategy_params("", kwargs)
+    params = _build_strategy_params(cls, "", kwargs)
 
     if symbols_raw:
         sym_list = [s.strip().upper() for s in symbols_raw.split(",")]
@@ -226,6 +335,11 @@ def _cmd_backtest(config: dict, **kwargs):
         click.echo()
         click.secho(f"  --- 绩效摘要 [{sym}] ---", fg="green")
         click.echo(f"  总收益率:  {s['total_return_pct']}%")
+        click.echo(f"  年化收益:  {s['annual_return_pct']}%")
+        click.echo(f"  年化波动:  {s['annual_volatility_pct']}%")
+        if "excess_return_pct" in s:
+            click.echo(f"  超额收益:  {s['excess_return_pct']}%")
+            click.echo(f"  信息比率:  {s['information_ratio']}")
         click.echo(f"  夏普比率:  {s['sharpe_ratio']}")
         click.echo(f"  最大回撤:  {s['max_drawdown_pct']}%")
         click.echo(f"  交易次数:  {s['total_trades']}")
@@ -255,10 +369,11 @@ def _cmd_scan(config: dict, **kwargs):
         click.secho("  没有可用的数据。", fg="red")
         return
 
-    from engine.runner import BacktestRunner
+    from engine.runner import BacktestRunner, load_strategy_class
 
     runner = BacktestRunner(config)
-    params = _build_strategy_params("", kwargs)
+    cls = load_strategy_class(strategy)
+    params = _build_strategy_params(cls, "", kwargs)
     click.echo(f"  扫描 {len(data_map)} 只股票，回看 {days} 日 ...")
     results = runner.scan_recent_buy_signals(data_map, strategy, params, lookback_days=days)
 
@@ -280,14 +395,12 @@ def _find_trade_logs(trades_dir: Path, symbol: Optional[str] = None, strategy: O
             continue
         if "_" not in name:
             continue
-        parts = name.split("_")
-        for i in range(1, len(parts)):
-            candidate_strategy = "_".join(parts[i:])
-            candidate_symbol = "_".join(parts[:i])
-            if candidate_strategy in ("sma_cross", "macd_cross", "kdj", "bollinger", "rsi", "single_ma"):
-                if (symbol is None or candidate_symbol == symbol) and (strategy is None or candidate_strategy == strategy):
-                    results.append((candidate_symbol, candidate_strategy, p))
-                break
+        split = _split_trade_log_name(name)
+        if split is None:
+            continue
+        candidate_symbol, candidate_strategy = split
+        if (symbol is None or candidate_symbol == symbol) and (strategy is None or candidate_strategy == strategy):
+            results.append((candidate_symbol, candidate_strategy, p))
     return results
 
 
@@ -359,22 +472,15 @@ def _cmd_compare(config: dict, **kwargs):
     from engine.runner import BacktestRunner, load_strategy_class
 
     runner = BacktestRunner(config)
-    strategy_configs = [
-        ("sma_cross", {"fast_period": 5, "slow_period": 20}),
-        ("macd_cross", {"fast_period": 12, "slow_period": 26, "signal_period": 9}),
-        ("kdj", {"k_period": 9, "smooth": 3, "oversold": 20, "overbought": 80}),
-        ("bollinger", {"period": 20, "devfactor": 2.0}),
-        ("rsi", {"period": 14, "oversold": 30, "overbought": 70}),
-        ("single_ma", {"period": 20}),
-    ]
+    strategies = _list_strategies()
 
     click.echo()
     click.echo(f"  {'策略':<16s} {'收益率':>8s} {'夏普':>8s} {'最大回撤':>8s} {'交易数':>6s} {'胜率':>6s} {'最终资金':>10s}")
     click.echo("  " + "-" * 62)
 
     best_name, best_ret = "", -999.0
-    for strategy_name, params in strategy_configs:
-        params["symbol"] = symbol
+    for strategy_name in strategies:
+        params = {"symbol": symbol}
         cls = load_strategy_class(strategy_name)
         result = runner.run(df, cls, params, verbose=False)
         stats = result["stats"]
@@ -453,6 +559,16 @@ def _cmd_stats(config: dict, **kwargs):
         click.secho(f'  未知子命令: "{sub}"。可用: analyze, compare。示例: stats analyze --strategy rsi', fg="red")
 
 
+def _cmd_dashboard(config: dict, **kwargs):
+    from visual.dashboard import generate_dashboard
+
+    output = kwargs.get("output")
+    if isinstance(output, bool):
+        output = None
+    out_path = generate_dashboard(config, output)
+    click.secho(f"  汇总面板已生成: {out_path}", fg="green")
+
+
 def _cmd_list(config: dict):
     cached = _list_cached_symbols(config)
     strats = _list_strategies()
@@ -520,6 +636,11 @@ def _execute_pipeline(config: dict, commands_text: str) -> None:
                 _cmd_list(config)
             elif cmd in ("download", "dl"):
                 _cmd_download(config, **args)
+            elif cmd == "index":
+                sub = parts[1] if len(parts) > 1 else "overview"
+                sub_args = _parse_args(parts[2:]) if len(parts) > 2 else {}
+                sub_args["sub"] = sub
+                _cmd_index(config, **sub_args)
             elif cmd in ("backtest", "bt"):
                 _cmd_backtest(config, **args)
             elif cmd == "scan":
@@ -533,6 +654,8 @@ def _execute_pipeline(config: dict, commands_text: str) -> None:
                 sub_args = _parse_args(parts[2:]) if len(parts) > 2 else {}
                 sub_args["sub"] = sub
                 _cmd_stats(config, **sub_args)
+            elif cmd == "dashboard":
+                _cmd_dashboard(config, **args)
             else:
                 click.secho(f'  未知命令: "{cmd}"', fg="red")
                 if not ignore_error:
@@ -575,7 +698,7 @@ def run_interactive():
     """启动交互式命令 REPL"""
     config = _load_config()
     token = config.get("tushare", {}).get("token", "")
-    if not token or token == "your_token_here":
+    if not token or token in {"your_token_here", "你的Tushare Token"}:
         click.secho("  请先在 config.yaml 中配置 tushare token", fg="red")
         if not click.confirm("  Token 未配置，是否继续?", default=False):
             return
@@ -628,6 +751,11 @@ def run_interactive():
                 _cmd_list(config)
             elif cmd in ("download", "dl"):
                 _cmd_download(config, **args)
+            elif cmd == "index":
+                sub = parts[1] if len(parts) > 1 else "overview"
+                sub_args = _parse_args(parts[2:]) if len(parts) > 2 else {}
+                sub_args["sub"] = sub
+                _cmd_index(config, **sub_args)
             elif cmd in ("backtest", "bt"):
                 _cmd_backtest(config, **args)
             elif cmd == "scan":
@@ -642,6 +770,8 @@ def run_interactive():
                 sub_args = _parse_args(parts[2:]) if len(parts) > 2 else {}
                 sub_args["sub"] = sub
                 _cmd_stats(config, **sub_args)
+            elif cmd == "dashboard":
+                _cmd_dashboard(config, **args)
             else:
                 click.secho(f'  未知命令: "{cmd}"，输入 help 查看帮助。', fg="red")
         except KeyboardInterrupt:

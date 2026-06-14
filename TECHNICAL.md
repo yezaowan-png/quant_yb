@@ -87,6 +87,41 @@ output/reports/{symbol}_{strategy}.html       ← 可视化报告
 
 ## 各模块实现思路
 
+### 指数概览链路
+
+第一阶段指数概览覆盖主要宽基和风格指数，指数清单配置在 `config.yaml::index_overview.indexes`，和股票回测链路保持隔离：
+
+```
+Tushare index_daily
+    │
+    ▼
+DataDownloader.download_index()
+    │ 清洗字段：date/open/high/low/close/pre_close/change/pct_chg/volume/amount
+    ▼
+data/cache/index/{symbol}.csv
+    │
+    ├─ analysis/index_overview.py 生成趋势、动量、震荡和风险概览
+    │
+    ▼
+visual/index_report.py
+    │ 生成日K/周K/月K + MACD/KDJ/RSI HTML
+    ▼
+output/reports/index/{symbol}_overview.html
+```
+
+CLI 入口为 `python main.py index download/report/overview`，单指数使用 `--symbol`，第一阶段批量生成使用 `--all`。`overview` 会先调用 `download_index()` 更新缓存，再调用 `generate_index_report()` 生成 HTML；`--all` 会按配置顺序逐个处理 `000001.SH`、`399001.SZ`、`399006.SZ`、`000688.SH`、`000300.SH`、`000905.SH`、`000852.SH`、`000985.SH`。该链路不读取交易流水、不生成权益曲线，也不改变现有回测 CSV 字段。
+
+### 汇总面板链路
+
+`python main.py dashboard` 会调用 `visual/dashboard.py::generate_dashboard()`，扫描本地输出目录并生成 `output/reports/dashboard.html`：
+
+- 指数导航：读取 `config.yaml::index_overview.indexes`、`data/cache/index/{symbol}.csv` 和 `output/reports/index/{symbol}_overview.html`
+- 策略汇总：读取 `output/trades/_summary_{strategy}.csv`，复用 `analysis/analyzer.py::compute_stats()` 计算核心卡片
+- 策略报告：链接到 `output/statistics/analysis_{strategy}.html` 和 `output/statistics/comparison.html`
+- 单标的报告：扫描 `output/reports/*.html`，展示最近生成的报告入口
+
+该面板只聚合已有输出，不重新下载数据、不运行回测、不改变任何 CSV 口径。
+
 ### `main.py` — 程序入口
 
 **核心思路**：利用 Click 的 `group(invoke_without_command=True)` 特性，实现"无子命令时自动进入交互模式"。
@@ -464,6 +499,152 @@ $$RSI = 100 - \frac{100}{1 + RS}$$
 
 ---
 
+### 7. 放量平台突破策略 (volume_platform_breakout) — `strategy/volume_platform_breakout.py`
+
+**核心思想**：用今天之前的历史 K 线识别窄幅整理平台，等待价格放量向上突破，并用 MA20 趋势过滤减少假突破。
+
+该策略刻意把“平台识别”和“突破确认”分成两部分：
+- 平台识别只使用历史窗口，即 `[-1]` 到 `[-lookback]`，不包含今天。
+- 突破确认使用今天的收盘价和成交量，即 `[0]`。
+
+这样可以避免前视偏差。如果把今天的 high 放进平台上沿，突破当天的高点会抬高 `upper`，导致突破判断被污染，甚至出现“用今天定义今天是否突破”的逻辑错误。
+
+**参数**：
+- `lookback=60`：平台识别回看交易日数
+- `max_range_pct=0.20`：平台最大振幅
+- `touch_tolerance=0.06`：上下沿触碰容忍度
+- `min_upper_touches=2` / `min_lower_touches=2`：上下沿最少触碰次数
+- `breakout_pct=0.02`：突破上沿确认幅度
+- `volume_period=30` / `volume_multiplier=1.3`：放量确认条件
+- `ma_slope_days=1`：MA20 向上确认天数
+- `platform_sell_tolerance=0.05`：跌破买入平台上沿卖出的容忍度
+- `stop_loss_pct=0.10`：相对实际买入成交价的止损比例
+
+#### 平台定义
+
+对每个交易日 `t`，平台窗口为：
+
+$$[t-lookback, t-1]$$
+
+平台上沿：
+
+$$upper_t = \max(high_{t-lookback}, ..., high_{t-1})$$
+
+平台下沿：
+
+$$lower_t = \min(low_{t-lookback}, ..., low_{t-1})$$
+
+平台振幅：
+
+$$range\_pct_t = \frac{upper_t - lower_t}{lower_t}$$
+
+当 `range_pct_t <= max_range_pct` 时，认为平台足够紧凑。
+
+#### 边界触碰次数
+
+上沿触碰条件：
+
+$$high_i \ge upper_t \times (1 - touch\_tolerance)$$
+
+下沿触碰条件：
+
+$$low_i \le lower_t \times (1 + touch\_tolerance)$$
+
+触碰次数用于过滤“只有一次尖峰或一次探底”的不稳定区间。默认要求上下沿都至少触碰 2 次，表示平台压力位和支撑位都被市场反复确认过。
+
+#### 突破与放量确认
+
+突破条件：
+
+$$close_t > upper_t \times (1 + breakout\_pct)$$
+
+放量条件：
+
+$$volume_t > SMA(volume, volume\_period)_{t-1} \times volume\_multiplier$$
+
+均量计算同样排除今天，使用 `data.volume[-1]` 到 `data.volume[-volume_period]`。这样今日成交量只作为突破当天的确认信号。
+
+#### 趋势过滤
+
+策略额外要求：
+
+$$close_t > MA20_t$$
+
+$$MA20_t > MA20_{t-ma\_slope\_days}$$
+
+这两条用于确认突破发生在短中期转强环境里，而不是均线仍然走弱时的下跌反弹。
+
+**买入规则**：
+1. 平台上沿 `upper` 使用过去 `lookback` 日 high 的最高值，平台下沿 `lower` 使用过去 `lookback` 日 low 的最低值。
+2. 平台计算排除今天，只使用 `data.high[-1]` 到 `data.high[-lookback]`、`data.low[-1]` 到 `data.low[-lookback]`。
+3. 平台振幅 `(upper - lower) / lower <= max_range_pct`。
+4. 上沿触碰次数 `high >= upper * (1 - touch_tolerance)` 不少于 `min_upper_touches`。
+5. 下沿触碰次数 `low <= lower * (1 + touch_tolerance)` 不少于 `min_lower_touches`。
+6. 今日收盘价 `close > upper * (1 + breakout_pct)`。
+7. 今日成交量大于过去 `volume_period` 日均量的 `volume_multiplier` 倍。
+8. 趋势过滤：`close > MA20`，且 `MA20[0] > MA20[-ma_slope_days]`。
+
+**卖出规则**：
+- 收盘价跌破 MA20
+- 或收盘价跌破买入时记录的平台上沿的 95%，即 `entry_upper * (1 - platform_sell_tolerance)`
+- 或收盘价相对实际买入成交价跌幅达到 `stop_loss_pct`
+
+#### 实现细节
+
+**文件**：`strategy/volume_platform_breakout.py`
+**类名**：`VolumePlatformBreakoutStrategy(BaseStrategy)`
+
+**核心状态变量**：
+- `self.ma20[data]`：20 日均线，用于趋势过滤和卖出判断
+- `self._entry_upper[data]`：买入信号出现时的平台上沿。卖出时判断是否跌回该平台上沿下方
+- `self._entry_price[data]`：实际买入成交价。卖出时用于计算固定止损
+
+**为什么要保存 `_entry_upper`**：
+
+平台上沿每天都会变化。如果卖出时重新计算平台上沿，可能会用新的平台边界替代买入时的突破位，导致突破失败判断漂移。因此策略在买入信号成立时记录当时的 `upper`，后续平台跌破只对比这个入场平台。
+
+**为什么要保存 `_entry_price`**：
+
+买入信号通常在收盘后产生，实际成交发生在下一根 K 线。策略通过 `notify_order()` 记录真实成交价，而不是用信号日收盘价估算止损价。固定止损阈值为：
+
+$$entry\_price \times (1 - stop\_loss\_pct)$$
+
+**为什么持仓时 `_next_buy_signal()` 直接返回 False**：
+
+`BaseStrategy.next()` 会在每个 bar 都调用 `_next_buy_signal()`，即使已经持仓也会先检查买入信号。新策略在持仓期间不再刷新 `_entry_upper`，避免后续再次出现突破形态时覆盖原始入场平台。
+
+**历史长度要求**：
+
+策略至少需要：
+
+```python
+max(lookback, volume_period, 20 + ma_slope_days)
+```
+
+个交易日以上的数据，才能同时满足平台识别、均量计算、MA20 和 MA20 斜率判断。
+
+**Backtrader 索引约定**：
+- `data.close[0]`：今天
+- `data.close[-1]`：昨天
+- `data.high[-lookback]`：平台窗口内最早一天
+
+本策略的平台和均量都从 `-1` 开始取值，确保没有前视偏差。
+
+#### 参数调优方向
+
+| 目标 | 推荐调整 |
+|------|----------|
+| 信号太少 | 提高 `max_range_pct`，降低 `volume_multiplier`，降低 `breakout_pct` |
+| 假突破太多 | 提高 `volume_multiplier`，提高 `min_upper_touches`，提高 `breakout_pct` |
+| 买点太滞后 | 降低 `breakout_pct`，或缩短 `lookback` |
+| 平台太松散 | 降低 `max_range_pct` |
+| 回踩平台就被过早卖出 | 提高 `platform_sell_tolerance` |
+| 平台跌破后卖出太慢 | 降低 `platform_sell_tolerance` |
+| 固定止损太宽 | 降低 `stop_loss_pct` |
+| 固定止损太容易触发 | 提高 `stop_loss_pct` |
+
+---
+
 ### `cli/stats_cli.py` — 数据统计命令
 
 **实现思路**：
@@ -480,6 +661,62 @@ $$RSI = 100 - \frac{100}{1 + RS}$$
 - TOP/BOTTOM 排行
 - 多策略雷达图归一化（Min-Max 归一化到 0-100，回撤维度反转）
 - Spearman 秩相关系数矩阵（基于同股票跨策略收益率）
+
+#### 策略画像统计卡片字段
+
+策略画像页面由 `analysis/report.py::build_analyze_page()` 生成，卡片数据来自 `analysis/analyzer.py::compute_stats()`。`compute_stats()` 的输入是批量回测生成的 `output/trades/_summary_{strategy}.csv`。
+
+单只股票回测的核心字段由 `engine/runner.py::BacktestRunner._build_stats()` 生成：
+
+| CSV 字段 | 单股含义 | 计算来源 |
+|----------|----------|----------|
+| `initial_cash` | 初始资金 | `config.yaml` 中 `backtest.initial_cash` |
+| `final_value` | 回测结束后的账户权益 | `cerebro.broker.getvalue()` |
+| `total_return_pct` | 单股总收益率 | `(final_value - initial_cash) / initial_cash * 100` |
+| `annual_return_pct` | 单股年化收益率 | `(final_value / initial_cash) ** (252 / trading_days) - 1`，再乘以 100 |
+| `annual_volatility_pct` | 单股年化波动率 | `equity.pct_change().std() * sqrt(252) * 100` |
+| `calmar_ratio` | 单股 Calmar 比率 | `annual_return_pct / max_drawdown_pct` |
+| `total_trades` | 单股完整交易次数 | Backtrader `TradeAnalyzer` 的盈利交易数 + 亏损交易数 |
+| `win_trades` | 盈利交易次数 | Backtrader `TradeAnalyzer` |
+| `lose_trades` | 亏损交易次数 | Backtrader `TradeAnalyzer` |
+| `win_rate_pct` | 单股胜率 | `win_trades / total_trades * 100`；无交易时为 0 |
+| `sharpe_ratio` | 单股夏普比率 | Backtrader `SharpeRatio` 分析器，`riskfreerate=0.03` |
+| `max_drawdown_pct` | 单股最大回撤 | Backtrader `DrawDown` 分析器 |
+| `max_drawdown_days` | 最大回撤持续长度 | Backtrader `DrawDown` 分析器 |
+| `start_date` / `end_date` | 回测起止日期 | K 线数据的最小/最大日期 |
+| `trading_days` | 权益曲线交易日数 | `EquityCurveAnalyzer` 记录的 bar 数 |
+| `benchmark_return_pct` | 基准同期收益率 | 基准指数缓存存在时计算，例如 `000300.SH` |
+| `excess_return_pct` | 超额收益率 | `total_return_pct - benchmark_return_pct` |
+| `information_ratio` | 信息比率 | 主动收益均值 / 主动收益标准差 × `sqrt(252)` |
+
+策略画像卡片字段在全市场维度上进一步聚合：
+
+| 卡片文案 | `compute_stats()` 字段 | 计算方式 |
+|----------|------------------------|----------|
+| 分析股票数 | `count` | `len(df)`，即 summary CSV 行数 |
+| 有交易股票 | `active_count` / `active_ratio` | `total_trades > 0` 的行数；占比 = `active_count / count * 100` |
+| 平均收益率 | `avg_return` | `mean(total_return_pct)`，包含无交易股票 |
+| 平均年化收益 | `avg_annual_return` | `mean(annual_return_pct)`，包含无交易股票 |
+| 交易股平均收益 | `avg_active_return` | 只对 `total_trades > 0` 的股票计算 `mean(total_return_pct)` |
+| 交易股平均年化 | `avg_active_annual_return` | 只对 `total_trades > 0` 的股票计算 `mean(annual_return_pct)` |
+| 平均年化波动 | `avg_annual_volatility` | `mean(annual_volatility_pct)` |
+| 平均超额收益 | `avg_excess_return` | `mean(excess_return_pct)`；如果没有基准列则默认为 0 |
+| 平均信息比率 | `avg_information_ratio` | `mean(information_ratio)`；如果没有基准列则默认为 0 |
+| 中位数收益率 | `median_return` | `median(total_return_pct)` |
+| 正收益比例 | `positive_ratio` | `count(total_return_pct > 0) / count * 100` |
+| 平均夏普 | `avg_sharpe` | `mean(sharpe_ratio)` |
+| 平均最大回撤 | `avg_max_dd` | `mean(max_drawdown_pct)` |
+| 平均胜率 | `avg_win_rate` | `mean(win_rate_pct)` |
+| 平均交易次数 | `avg_trades` | `mean(total_trades)` |
+
+注意事项：
+
+1. `avg_return`、`avg_annual_return`、`avg_annual_volatility` 都包含无交易股票。无交易股票的收益、年化收益和波动通常为 0，因此信号很少的策略会被 0 值明显稀释。
+2. `avg_active_return` 和 `avg_active_annual_return` 排除了无交易股票，更接近“策略真正出手后的平均效果”。
+3. `median_return` 用于观察典型股票表现。如果平均收益很高但中位数很低，通常说明少数大赢家拉高了均值。
+4. `positive_ratio` 统计的是全部股票中的正收益比例，不只统计有交易股票。
+5. `avg_win_rate` 是“先算每只股票自己的胜率，再取平均”，不是把所有交易混在一起算总体胜率。
+6. `avg_excess_return` 和 `avg_information_ratio` 依赖基准指数缓存。若 `data/cache/{benchmark.symbol}.csv` 不存在，相关字段不会出现在 summary 中，统计报告会显示 0。
 
 ---
 

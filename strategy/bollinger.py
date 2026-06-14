@@ -8,6 +8,11 @@ from strategy.base import BaseStrategy
 class BollingerStrategy(BaseStrategy):
     """收盘价突破下轨次日买入，突破上轨次日卖出"""
 
+    PARAM_DEFINITIONS = {
+        "period": {"type": int, "default": 20, "help": "布林带周期"},
+        "devfactor": {"type": float, "default": 2.0, "help": "标准差倍数"},
+    }
+
     params = (
         ("period", 20),
         ("devfactor", 2.0),

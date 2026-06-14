@@ -8,6 +8,13 @@ from strategy.base import BaseStrategy
 class KdjStrategy(BaseStrategy):
     """K < 20 金叉买入，K > 80 死叉卖出"""
 
+    PARAM_DEFINITIONS = {
+        "k_period": {"type": int, "default": 9, "help": "KDJ RSV 周期"},
+        "smooth": {"type": int, "default": 3, "help": "K/D 平滑周期"},
+        "oversold": {"type": int, "default": 20, "help": "超卖阈值"},
+        "overbought": {"type": int, "default": 80, "help": "超买阈值"},
+    }
+
     params = (
         ("k_period", 9),
         ("smooth", 3),

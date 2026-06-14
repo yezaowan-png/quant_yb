@@ -8,6 +8,13 @@ from strategy.base import BaseStrategy
 class MacdCrossStrategy(BaseStrategy):
     """DIF 上穿 DEA 买入，DIF 下穿 DEA 卖出"""
 
+    PARAM_ALIASES = {"fast": "fast_period", "slow": "slow_period"}
+    PARAM_DEFINITIONS = {
+        "fast_period": {"type": int, "default": 12, "help": "快 EMA 周期"},
+        "slow_period": {"type": int, "default": 26, "help": "慢 EMA 周期"},
+        "signal_period": {"type": int, "default": 9, "help": "信号线周期"},
+    }
+
     params = (
         ("fast_period", 12),
         ("slow_period", 26),

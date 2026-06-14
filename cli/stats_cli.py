@@ -58,7 +58,14 @@ def analyze_strategy(strategy: str):
     click.echo(f"  {display} — 策略画像")
     click.echo(f"{'='*60}")
     click.echo(f"  股票数:     {stats['count']}")
-    click.echo(f"  平均收益:   {stats['avg_return']:+.1f}%")
+    click.echo(f"  有交易股票: {stats['active_count']} ({stats['active_ratio']:.1f}%)")
+    click.echo(f"  平均收益:   {stats['avg_return']:+.2f}%")
+    click.echo(f"  平均年化:   {stats['avg_annual_return']:+.2f}%")
+    click.echo(f"  交易股平均: {stats['avg_active_return']:+.2f}%")
+    click.echo(f"  交易股年化: {stats['avg_active_annual_return']:+.2f}%")
+    click.echo(f"  年化波动:   {stats['avg_annual_volatility']:.1f}%")
+    click.echo(f"  超额收益:   {stats['avg_excess_return']:+.1f}%")
+    click.echo(f"  信息比率:   {stats['avg_information_ratio']:.3f}")
     click.echo(f"  中位收益:   {stats['median_return']:+.1f}%")
     click.echo(f"  正收益比例: {stats['positive_ratio']:.1f}% ({stats['positive_count']}/{stats['count']})")
     click.echo(f"  平均夏普:   {stats['avg_sharpe']:.3f}")
@@ -93,7 +100,10 @@ def compare_strategies():
         s = compute_stats(df)
         display = _STRATEGY_LABELS.get(name, name)
         click.echo(f"  {display:<10s}  {s['count']:>5d} 只  "
-                   f"收益 {s['avg_return']:>+7.1f}%  "
+                   f"收益 {s['avg_return']:>+7.2f}%  "
+                   f"年化 {s['avg_annual_return']:>+7.2f}%  "
+                   f"交易股 {s['avg_active_return']:>+7.2f}%  "
+                   f"超额 {s['avg_excess_return']:>+7.1f}%  "
                    f"正向率 {s['positive_ratio']:>5.1f}%  "
                    f"夏普 {s['avg_sharpe']:>+7.3f}")
 

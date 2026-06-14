@@ -14,7 +14,8 @@ _ECHARTS_SRC = "https://assets.pyecharts.org/assets/v6/echarts.min.js"
 
 # ---- 策略中文名 ----
 _STRAT_NAMES = {"sma_cross": "双均线交叉", "macd_cross": "MACD 金叉", "kdj": "KDJ",
-                "bollinger": "布林带", "rsi": "RSI", "single_ma": "单均线"}
+                "bollinger": "布林带", "rsi": "RSI", "single_ma": "单均线",
+                "volume_platform_breakout": "放量平台突破"}
 
 
 # ============================================================
