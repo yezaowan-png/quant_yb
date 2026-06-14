@@ -56,6 +56,7 @@ output:
   signals_dir: "output/signals"
   statistics_dir: "output/statistics"
   decisions_dir: "output/decisions"
+  experiments_dir: "output/experiments"
 
 decision_memory:
   enabled: true            # 扫描/批量回测导出买点时，同步记录到决策记忆

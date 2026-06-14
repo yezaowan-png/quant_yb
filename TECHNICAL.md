@@ -113,15 +113,22 @@ CLI 入口为 `python main.py index download/report/overview`，单指数使用 
 
 ### 汇总面板链路
 
-`python main.py dashboard` 会调用 `visual/dashboard.py::generate_dashboard()`，扫描本地输出目录并生成 `output/reports/dashboard.html`：
+`python main.py dashboard` 会调用 `visual/dashboard.py::generate_dashboard()`，扫描本地输出目录并生成 `output/reports/dashboard.html`。阶段 4 后该页面定位为“研究总控面板”，用于把市场环境、数据健康、策略表现、信号复盘、实验归档和最近报告放在同一个入口查看。
 
-- 指数导航：读取 `config.yaml::index_overview.indexes`、`data/cache/index/{symbol}.csv` 和 `output/reports/index/{symbol}_overview.html`
-- 策略汇总：读取 `output/trades/_summary_{strategy}.csv`，复用 `analysis/analyzer.py::compute_stats()` 计算核心卡片
-- 策略报告：链接到 `output/statistics/analysis_{strategy}.html` 和 `output/statistics/comparison.html`
-- 信号复盘：读取 `output/decisions/decision_memory.csv`，展示信号数量、评估状态和最近信号
-- 单标的报告：扫描 `output/reports/*.html`，展示最近生成的报告入口
+面板只读本地产物：
 
-该面板只聚合已有输出，不重新下载数据、不运行回测、不改变任何 CSV 口径。
+- 指数概览：读取 `config.yaml::index_overview.indexes`、`data/cache/index/{symbol}.csv` 和 `output/reports/index/{symbol}_overview.html`。
+- 市场温度：从指数缓存最新一行读取 `pct_chg`，计算指数平均涨跌、上涨/下跌数量、最强/最弱指数；无指数缓存时显示待生成。
+- 数据健康：扫描 `data/cache/*.csv`、`data/cache/index/*.csv`、`output/reports/index/*.html`，展示股票缓存数量、最新股票缓存日期、过期缓存数量、指数缓存覆盖度和指数报告数量。
+- 策略排行榜：读取 `output/trades/_summary_{strategy}.csv`，复用 `analysis/analyzer.py::compute_stats()`，按全市场平均收益排序，避免 dashboard 另起一套绩效口径。
+- 策略汇总：按 `strategy/*.py` 自动发现策略模块，链接到 `output/statistics/analysis_{strategy}.html`，展示股票数、平均收益、交易股平均收益、正收益比例、夏普、回撤和报告生成状态。
+- 策略横向对比：若存在 `output/statistics/comparison.html`，顶部提供入口；不存在时显示为待生成状态。
+- 信号复盘：读取 `output/decisions/decision_memory.csv`，展示信号数量、已评估/待评估数量、最近信号日期、5 日未来收益均值和 5 日超额收益均值。
+- 最近实验：扫描 `output/experiments/*/manifest.json` 和实验目录的 `reports/` 子目录，用于展示最近实验归档入口。
+- 单标的报告：扫描 `output/reports/*.html`，排除 `dashboard.html`，展示最近生成的单标的报告入口。
+- 风险提示：根据本地状态提示幸存者偏差、缓存日期不齐、基准缓存缺失、信号待评估、未来函数审计尚未接入等限制。
+
+该面板只聚合已有输出，不重新下载数据、不运行回测、不改变任何 CSV 口径。页面中的策略收益、回撤、夏普、正收益占比等字段必须继续来自回测汇总 CSV 和 `compute_stats()`；不得在 dashboard 层重新定义绩效指标。
 
 ### 决策记忆链路
 
@@ -881,6 +888,7 @@ output:
   signals_dir: "output/signals"   # 买点扫描汇总输出目录
   statistics_dir: "output/statistics" # 策略画像和对比报告目录
   decisions_dir: "output/decisions"   # 决策记忆复盘表目录
+  experiments_dir: "output/experiments" # 实验归档目录，供 dashboard 展示最近实验入口
 
 decision_memory:
   enabled: true                    # 导出买点时同步写入 decision memory
