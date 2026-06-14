@@ -55,6 +55,11 @@ output:
   reports_dir: "output/reports"
   signals_dir: "output/signals"
   statistics_dir: "output/statistics"
+  decisions_dir: "output/decisions"
+
+decision_memory:
+  enabled: true            # 扫描/批量回测导出买点时，同步记录到决策记忆
+  horizons: [5, 10, 20]   # 复盘窗口，单位为实际交易日
 
 parallel:
   download_workers: 5

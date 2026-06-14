@@ -118,9 +118,82 @@ CLI 入口为 `python main.py index download/report/overview`，单指数使用 
 - 指数导航：读取 `config.yaml::index_overview.indexes`、`data/cache/index/{symbol}.csv` 和 `output/reports/index/{symbol}_overview.html`
 - 策略汇总：读取 `output/trades/_summary_{strategy}.csv`，复用 `analysis/analyzer.py::compute_stats()` 计算核心卡片
 - 策略报告：链接到 `output/statistics/analysis_{strategy}.html` 和 `output/statistics/comparison.html`
+- 信号复盘：读取 `output/decisions/decision_memory.csv`，展示信号数量、评估状态和最近信号
 - 单标的报告：扫描 `output/reports/*.html`，展示最近生成的报告入口
 
 该面板只聚合已有输出，不重新下载数据、不运行回测、不改变任何 CSV 口径。
+
+### 决策记忆链路
+
+Decision Memory 是一个事后复盘层，目标是记录策略产生的买点，并在未来数据足够后评估这些买点之后的表现。它不改变策略信号、不参与下单、不改变 Backtrader 成交模型。
+
+```
+backtest scan / 批量 backtest run
+    │ 产生近 N 个交易日买点
+    ▼
+output/signals/buy_signals_{strategy}_{date}.csv
+    │
+    ├─ engine/runner.py::_export_buy_signals()
+    │     自动调用 decision.recorder.append_buy_signals()
+    ▼
+output/decisions/decision_memory.csv
+    │
+    ├─ python main.py decision evaluate
+    │     用本地行情缓存计算未来 5/10/20 个实际交易日收益
+    ▼
+dashboard / decision summary
+```
+
+#### 记录阶段
+
+`decision/recorder.py` 负责稳定记录信号：
+
+- `signal_id` 由 `symbol + strategy + signal_date + signal_type + params_json` 生成，用于去重。
+- `params_json` 保存策略参数快照，避免不同参数组合的同日信号混在一起。
+- `market_context_json` 预留给后续市场环境、指数状态、行业状态等上下文。
+- 记录时不计算未来收益，未来收益字段保持空值，`evaluation_status` 默认为 `pending`。
+
+这一步可以由两种方式触发：
+
+```bash
+# 扫描或批量回测后自动写入
+python main.py backtest scan --strategy sma_cross --days 5
+
+# 手动把最近一次买点扫描 CSV 写入
+python main.py decision record --strategy sma_cross
+```
+
+#### 评估阶段
+
+`decision/evaluator.py` 只读取本地缓存，不联网：
+
+1. 读取 `output/decisions/decision_memory.csv`。
+2. 对每条信号找到 `signal_date` 当天或之后的第一个交易日。
+3. 以该交易日收盘价为起点，计算未来第 5、10、20 个实际交易日的收益。
+4. 如果 `benchmark.enabled=true` 且本地存在基准指数缓存，则计算同期基准收益和超额收益。
+5. 根据数据完整程度更新状态：
+   - `evaluated`：所有窗口都有未来数据。
+   - `partial`：部分窗口有未来数据。
+   - `pending_future_data`：未来数据不足。
+   - `missing_symbol_data`：找不到标的缓存。
+
+命令：
+
+```bash
+python main.py decision evaluate --strategy sma_cross --horizons 5,10,20
+python main.py decision summary --strategy sma_cross
+```
+
+#### 未来函数边界
+
+Decision Memory 中的 `future_*`、`benchmark_*` 和 `excess_*` 字段只能用于事后复盘：
+
+- 策略类不得读取 `output/decisions/decision_memory.csv`。
+- 回测信号不得依赖未来收益字段。
+- dashboard 只展示已经生成的复盘结果，不反向影响任何策略。
+- 若未来数据不足，字段保留空值，不用估算值填充。
+
+这个设计可以帮助分析“信号有没有用”，但不会改变“信号如何产生”。
 
 ### `main.py` — 程序入口
 
@@ -177,6 +250,7 @@ def cli(ctx):
 2. **`backtest scan`**：
    - 新增命令，对所有已缓存股票运行策略，检测近N日买点
    - 结果导出到 `output/signals/buy_signals_{策略名}_{日期}.csv`
+   - 若 `decision_memory.enabled=true`，会同步写入 `output/decisions/decision_memory.csv`
 3. **`backtest report`**：
    - 自动查找对应的交易流水文件和权益文件
    - 如果文件不存在给出明确提示（比如"请先执行 backtest run"）
@@ -805,6 +879,12 @@ output:
   trades_dir: "output/trades"     # 交易流水输出目录
   reports_dir: "output/reports"   # 报告输出目录
   signals_dir: "output/signals"   # 买点扫描汇总输出目录
+  statistics_dir: "output/statistics" # 策略画像和对比报告目录
+  decisions_dir: "output/decisions"   # 决策记忆复盘表目录
+
+decision_memory:
+  enabled: true                    # 导出买点时同步写入 decision memory
+  horizons: [5, 10, 20]            # 默认复盘窗口，单位为实际交易日
 
 defaults:
   start_date: "20210101"          # 默认起始日期

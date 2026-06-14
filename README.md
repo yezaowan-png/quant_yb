@@ -6,14 +6,15 @@
 
 比如你有一个想法："当 5 日均线上穿 20 日均线时买入，下穿时卖出"，这个策略到底能不能赚钱？在过去三年里表现如何？这个系统可以给你答案，并生成图表让你直观看到每一次买卖点。
 
-它包含七个功能：
+它包含八个功能：
 1. **下载数据** — 从网络获取 A 股的历史K线数据，存到本地（默认全市场非ST股票）
 2. **策略回测** — 用历史数据模拟你的策略，算出收益率、胜率等指标（内置7种策略）
 3. **策略对比** — 一次运行所有策略，横向对比找出最优
 4. **扫描买点** — 检测最近N日内存在买入信号的股票，汇总导出
 5. **生成报告** — 把回测结果画成 K线图（日K/周K/月K可切换，含均线、成交量、MACD、KDJ、RSI）+ 权益曲线，存为 HTML 文件
 6. **数据统计** — 基于回测结果生成全市场策略画像和多策略对比分析报告
-7. **命令流水线** — 按顺序批量执行多条命令，支持分号分隔和脚本文件
+7. **决策记忆** — 记录买点信号，基于未来实际交易日窗口复盘 5/10/20 日收益和相对基准表现
+8. **命令流水线** — 按顺序批量执行多条命令，支持分号分隔和脚本文件
 
 ## 第一次使用（环境准备）
 
@@ -74,6 +75,9 @@ python main.py
 quant> download --start 20210101 --end 20231231
 quant> backtest --strategy sma_cross --symbol 000001.SZ
 quant> scan --strategy sma_cross
+quant> decision record --strategy sma_cross
+quant> decision evaluate --strategy sma_cross
+quant> decision summary --strategy sma_cross
 quant> compare --symbol 000001.SZ
 quant> report --symbol 000001.SZ --strategy sma_cross
 quant> run "download; backtest --strategy rsi; report; stats compare"
@@ -139,6 +143,15 @@ python main.py backtest run --strategy sma_cross
 # 扫描近5日买点
 python main.py backtest scan --strategy sma_cross --days 5
 
+# 把最近一次买点扫描结果写入决策记忆
+python main.py decision record --strategy sma_cross
+
+# 用本地缓存复盘信号未来 5/10/20 个实际交易日表现
+python main.py decision evaluate --strategy sma_cross --horizons 5,10,20
+
+# 查看决策记忆摘要
+python main.py decision summary --strategy sma_cross
+
 # 生成报告
 python main.py backtest report --symbol 000001.SZ
 
@@ -169,7 +182,55 @@ python main.py dashboard
 
 默认报告输出到 `output/reports/index/{指数代码}_overview.html`，包含日K/周K/月K、MA5/10/20/60、成交量、MACD、KDJ、RSI，以及最新收盘、当日涨跌幅、近5日/20日收益、年初至今、20日最大回撤和波动率等概览卡片。
 
-汇总面板默认输出到 `output/reports/dashboard.html`，会自动扫描指数概览、策略画像、策略横向对比、批量回测汇总 CSV 和最近生成的单标的报告，方便从一个入口跳转。
+汇总面板默认输出到 `output/reports/dashboard.html`，会自动扫描指数概览、策略画像、策略横向对比、批量回测汇总 CSV、决策记忆和最近生成的单标的报告，方便从一个入口跳转。
+
+### 决策记忆和信号复盘
+
+`decision` 命令用于把策略产生的买点信号记录下来，并在未来数据足够后做事后复盘。它不是新的交易策略，也不会把未来收益反向用于买卖信号；它只是回答一个复盘问题：**这个信号出现之后，未来 5/10/20 个实际交易日表现如何？是否跑赢基准？**
+
+常用流程：
+
+```bash
+# 第一步：先扫描买点，会生成 output/signals/buy_signals_{strategy}_{日期}.csv
+python main.py backtest scan --strategy sma_cross --days 5
+
+# 第二步：把买点扫描 CSV 写入 decision memory
+python main.py decision record --strategy sma_cross
+
+# 第三步：等未来数据足够后，基于本地缓存评估未来收益
+python main.py decision evaluate --strategy sma_cross --horizons 5,10,20
+
+# 第四步：查看摘要，或重新生成 dashboard
+python main.py decision summary --strategy sma_cross
+python main.py dashboard
+```
+
+输出文件：
+
+```text
+output/decisions/decision_memory.csv
+```
+
+核心字段说明：
+
+| 字段 | 含义 |
+|------|------|
+| `signal_id` | 根据信号标的、策略、日期、类型和参数生成的稳定 ID，用于去重 |
+| `symbol` / `strategy` | 信号对应股票和策略 |
+| `signal_date` | 买点信号日期，按实际交易日记录 |
+| `price` | 信号日期附近的收盘价；如果没有本地缓存则可为空 |
+| `params_json` | 策略参数快照，用于区分不同参数组合 |
+| `future_5d_return_pct` | 信号后第 5 个实际交易日的收益率 |
+| `benchmark_5d_return_pct` | 同一窗口内基准指数收益率，默认来自 `benchmark.symbol` |
+| `excess_5d_return_pct` | 信号收益减去基准收益 |
+| `evaluation_status` | `pending`、`partial`、`evaluated`、`pending_future_data` 或 `missing_symbol_data` |
+
+复盘口径注意：
+
+- `5/10/20d` 指的是**实际交易日数量**，不是自然日。
+- 未来收益只用于事后评估，不能参与策略信号。
+- 若未来数据不足，对应字段保持空值，状态显示为待评估或部分评估。
+- 基准数据来自本地缓存；如果基准缓存不存在，仍会计算个股未来收益，但超额收益为空。
 
 第一阶段重点指数包括：
 
@@ -362,6 +423,8 @@ quant> scan --strategy sma_cross --days 5
 
 输出文件保存在 `output/signals/buy_signals_{策略名}_{日期}.csv`，包含股票代码、买点日期、最新价格等信息。这相当于一个简易的"选股器"，帮你快速筛选出当前值得关注的股票。
 
+如果 `config.yaml` 中 `decision_memory.enabled` 为 `true`，扫描或批量回测导出买点时，还会自动把这些买点写入 `output/decisions/decision_memory.csv`。后续可以用 `decision evaluate` 对这些信号做未来表现复盘。
+
 ## 数据统计
 
 `stats` 命令基于已有的回测结果，生成全市场维度的可视化统计分析 HTML 报告。包含两个子命令：
@@ -437,12 +500,14 @@ quant_yb/
 │   └── cache/           ← 下载的股票数据缓存（CSV 文件）
 ├── engine/              ← 回测引擎相关代码
 ├── strategy/            ← 策略代码（你的买卖逻辑放在这里）
+├── decision/            ← 决策记忆与信号复盘
 ├── analysis/            ← 数据统计分析相关代码
 ├── visual/              ← 图表生成相关代码
 ├── output/
 │   ├── trades/          ← 回测交易记录输出
 │   ├── reports/         ← HTML 报告输出
 │   ├── signals/         ← 买点扫描汇总输出
+│   ├── decisions/       ← 决策记忆与复盘输出
 │   └── statistics/      ← 统计分析 HTML 报告输出
 └── CLAUDE.md            ← 给 AI 助手的说明文档
 ```
@@ -518,6 +583,25 @@ quant_yb/
 | `symbol` | 股票代码 |
 | `recent_buy_dates` | 最近 N 日内的买点日期（多个用逗号分隔） |
 | `signal_count` | 买点数量 |
+
+### 6. 决策记忆 — `decisions/decision_memory.csv`
+
+`decision record` 或买点扫描自动写入的信号复盘表。它用于事后分析策略信号质量，不参与交易信号生成。
+
+| 列名 | 含义 |
+|------|------|
+| `signal_id` | 信号唯一 ID，用于去重 |
+| `symbol` | 股票代码 |
+| `strategy` | 策略名称 |
+| `signal_date` | 信号出现日期 |
+| `signal_type` | 信号类型，当前主要为 `BUY` |
+| `price` | 信号日期附近收盘价；缓存不足时可为空 |
+| `params_json` | 策略参数快照 |
+| `source` | 信号来源文件或来源说明 |
+| `evaluation_status` | 复盘状态 |
+| `future_5d_return_pct` / `future_10d_return_pct` / `future_20d_return_pct` | 信号后第 N 个实际交易日收益 |
+| `benchmark_5d_return_pct` / `benchmark_10d_return_pct` / `benchmark_20d_return_pct` | 同窗口基准收益 |
+| `excess_5d_return_pct` / `excess_10d_return_pct` / `excess_20d_return_pct` | 个股信号收益减基准收益 |
 
 ## 常见问题
 

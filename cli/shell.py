@@ -125,6 +125,12 @@ def _print_help():
     click.echo("    参数: --strategy (策略名称)  --days (回看天数)")
     click.echo("    示例: scan --strategy sma_cross --days 5")
     click.echo()
+    click.echo("  decision        决策记忆：记录买点并复盘未来表现")
+    click.echo("    子命令: record / evaluate / summary")
+    click.echo("    示例: decision record --strategy sma_cross")
+    click.echo("          decision evaluate --strategy sma_cross --horizons 5,10,20")
+    click.echo("          decision summary --strategy sma_cross")
+    click.echo()
     click.echo("  report, rp      生成可视化 HTML 报告（不指定 --symbol 则为所有股票生成）")
     click.echo("    参数: --symbol (股票代码, 可选)  --strategy (策略名称, 可选)")
     click.echo("    示例: report --symbol 000001.SZ --strategy sma_cross")
@@ -569,6 +575,65 @@ def _cmd_dashboard(config: dict, **kwargs):
     click.secho(f"  汇总面板已生成: {out_path}", fg="green")
 
 
+def _cmd_decision(config: dict, **kwargs):
+    sub = kwargs.get("sub") or "summary"
+    if isinstance(sub, bool):
+        sub = "summary"
+    sub = sub.strip().lower()
+    strategy = kwargs.get("strategy")
+    if isinstance(strategy, bool):
+        strategy = None
+    symbol = kwargs.get("symbol")
+    if isinstance(symbol, bool):
+        symbol = None
+
+    if sub == "record":
+        if not strategy:
+            click.secho("  请指定 --strategy。示例: decision record --strategy sma_cross", fg="red")
+            return
+        from cli.decision_cli import _latest_signals_file, _load_data_map_for_file
+        from decision.recorder import append_signals_from_file
+
+        signals_file = kwargs.get("signals_file")
+        if isinstance(signals_file, bool):
+            signals_file = None
+        path = Path(signals_file) if signals_file else _latest_signals_file(config, strategy)
+        if path is None or not path.exists():
+            click.secho(f"  未找到策略 {strategy} 的买点 CSV，请先执行 scan --strategy {strategy}", fg="red")
+            return
+        data_map = _load_data_map_for_file(config, path)
+        out_path, added = append_signals_from_file(config, strategy, path, data_map=data_map)
+        click.secho(f"  决策记忆已更新: {out_path}，新增 {added} 条", fg="green")
+    elif sub == "evaluate":
+        from decision.evaluator import evaluate_memory, parse_horizons
+
+        horizons = kwargs.get("horizons", "5,10,20")
+        if isinstance(horizons, bool):
+            horizons = "5,10,20"
+        stats = evaluate_memory(
+            config,
+            strategy=strategy,
+            symbol=symbol,
+            horizons=parse_horizons(str(horizons)),
+        )
+        click.secho(f"  决策记忆评估完成: {stats['path']}", fg="green")
+        click.echo(f"  匹配 {stats['matched']} | 完整 {stats['evaluated']} | 部分 {stats['partial']} | 待评估 {stats['pending']} | 缺数据 {stats['missing']}")
+    elif sub == "summary":
+        from decision.evaluator import summarize_memory
+        from decision.recorder import decision_memory_path
+
+        summary = summarize_memory(config, strategy=strategy)
+        click.echo(f"  决策记忆: {decision_memory_path(config)}")
+        click.echo(f"  信号 {summary['count']} | 完整 {summary['evaluated']} | 部分 {summary['partial']} | 待评估 {summary['pending']}")
+        click.echo(f"  最新信号: {summary['latest_signal_date'] or '--'}")
+        avg_5d = summary["avg_future_5d_return_pct"]
+        avg_excess = summary["avg_excess_5d_return_pct"]
+        click.echo(f"  平均5日收益: {'--' if avg_5d is None else f'{avg_5d:+.2f}%'}")
+        click.echo(f"  平均5日超额: {'--' if avg_excess is None else f'{avg_excess:+.2f}%'}")
+    else:
+        click.secho("  用法: decision record|evaluate|summary", fg="yellow")
+
+
 def _cmd_list(config: dict):
     cached = _list_cached_symbols(config)
     strats = _list_strategies()
@@ -645,6 +710,11 @@ def _execute_pipeline(config: dict, commands_text: str) -> None:
                 _cmd_backtest(config, **args)
             elif cmd == "scan":
                 _cmd_scan(config, **args)
+            elif cmd == "decision":
+                sub = parts[1] if len(parts) > 1 else "summary"
+                sub_args = _parse_args(parts[2:]) if len(parts) > 2 else {}
+                sub_args["sub"] = sub
+                _cmd_decision(config, **sub_args)
             elif cmd in ("report", "rp"):
                 _cmd_report(config, **args)
             elif cmd in ("compare", "cmp"):
@@ -760,6 +830,11 @@ def run_interactive():
                 _cmd_backtest(config, **args)
             elif cmd == "scan":
                 _cmd_scan(config, **args)
+            elif cmd == "decision":
+                sub = parts[1] if len(parts) > 1 else "summary"
+                sub_args = _parse_args(parts[2:]) if len(parts) > 2 else {}
+                sub_args["sub"] = sub
+                _cmd_decision(config, **sub_args)
             elif cmd in ("report", "rp"):
                 _cmd_report(config, **args)
             elif cmd in ("compare", "cmp"):

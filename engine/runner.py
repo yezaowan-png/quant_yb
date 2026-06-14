@@ -360,7 +360,7 @@ class BacktestRunner:
         summaries.sort(key=lambda x: x["symbol"])
         all_buy_signals.sort(key=lambda x: x["symbol"])
         self._export_summary(summaries, strategy_name)
-        self._export_buy_signals(all_buy_signals, strategy_name)
+        self._export_buy_signals(all_buy_signals, strategy_name, sp)
         return summaries
 
     def scan_recent_buy_signals(
@@ -410,7 +410,7 @@ class BacktestRunner:
         click.echo(f"  扫描完成，总耗时: {elapsed:.0f} 秒")
 
         results.sort(key=lambda x: x["symbol"])
-        self._export_buy_signals(results, strategy_name)
+        self._export_buy_signals(results, strategy_name, sp)
         return results
 
     # ------------------------------------------------------------
@@ -555,7 +555,12 @@ class BacktestRunner:
         click.echo(f"\n批量回测汇总已导出: {path}")
         return path
 
-    def _export_buy_signals(self, signals: list[dict], strategy_name: str) -> Path:
+    def _export_buy_signals(
+        self,
+        signals: list[dict],
+        strategy_name: str,
+        strategy_params: Optional[dict] = None,
+    ) -> Path:
         if not signals:
             click.echo("\n  近5日内无买点信号。")
             return Path(".")
@@ -565,4 +570,28 @@ class BacktestRunner:
         path = signals_dir / f"buy_signals_{strategy_name}_{today}.csv"
         pd.DataFrame(signals).to_csv(path, index=False)
         click.echo(f"\n  近5日买点汇总已导出: {path}  (共 {len(signals)} 只)")
+        self._record_decision_signals(signals, strategy_name, strategy_params, path)
         return path
+
+    def _record_decision_signals(
+        self,
+        signals: list[dict],
+        strategy_name: str,
+        strategy_params: Optional[dict],
+        source_path: Path,
+    ) -> None:
+        if not self.config.get("decision_memory", {}).get("enabled", True):
+            return
+        try:
+            from decision.recorder import append_buy_signals
+
+            memory_path, added = append_buy_signals(
+                config=self.config,
+                strategy=strategy_name,
+                signals=signals,
+                strategy_params=strategy_params,
+                source=str(source_path),
+            )
+            click.echo(f"  决策记忆已更新: {memory_path}  (新增 {added} 条)")
+        except Exception as e:
+            click.echo(f"  决策记忆更新失败: {e}", err=True)

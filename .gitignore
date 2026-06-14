@@ -19,6 +19,8 @@ output/trades/
 output/reports/
 output/signals/
 output/statistics/
+output/decisions/
+output/audit/
 
 # 系统文件
 .DS_Store

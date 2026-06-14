@@ -144,12 +144,72 @@ def _recent_stock_reports(reports_dir: Path, output_path: Path, limit: int = 12)
     return reports
 
 
+def _decision_snapshot(decision_path: Path) -> dict[str, Any]:
+    if not decision_path.exists():
+        return {
+            "exists": False,
+            "count": 0,
+            "evaluated": 0,
+            "partial": 0,
+            "pending": 0,
+            "latest_signal_date": "",
+            "avg_future_5d": "--",
+            "avg_excess_5d": "--",
+        }
+    try:
+        df = pd.read_csv(decision_path, dtype={"symbol": str, "signal_date": str})
+    except Exception:
+        return {"exists": False, "count": 0, "evaluated": 0, "partial": 0, "pending": 0}
+    if df.empty:
+        return {"exists": True, "count": 0, "evaluated": 0, "partial": 0, "pending": 0}
+    statuses = df.get("evaluation_status", pd.Series([], dtype=str)).fillna("pending")
+    future_5d = pd.to_numeric(df.get("future_5d_return_pct"), errors="coerce")
+    excess_5d = pd.to_numeric(df.get("excess_5d_return_pct"), errors="coerce")
+    return {
+        "exists": True,
+        "count": int(len(df)),
+        "evaluated": int((statuses == "evaluated").sum()),
+        "partial": int((statuses == "partial").sum()),
+        "pending": int(statuses.isin(["pending", "pending_future_data"]).sum()),
+        "latest_signal_date": str(df["signal_date"].dropna().max())[:10] if "signal_date" in df.columns else "",
+        "avg_future_5d": _fmt_pct(future_5d.mean()) if not future_5d.dropna().empty else "--",
+        "avg_excess_5d": _fmt_pct(excess_5d.mean()) if not excess_5d.dropna().empty else "--",
+    }
+
+
+def _recent_decisions(decision_path: Path, limit: int = 8) -> list[dict[str, str]]:
+    if not decision_path.exists():
+        return []
+    try:
+        df = pd.read_csv(decision_path, dtype={"symbol": str, "signal_date": str})
+    except Exception:
+        return []
+    if df.empty:
+        return []
+    df = df.sort_values(["signal_date", "recorded_at"], ascending=False, na_position="last").head(limit)
+    rows = []
+    for _, row in df.iterrows():
+        future_5d = row.get("future_5d_return_pct")
+        rows.append(
+            {
+                "symbol": str(row.get("symbol", "")),
+                "strategy": _STRATEGY_LABELS.get(str(row.get("strategy", "")), str(row.get("strategy", ""))),
+                "date": str(row.get("signal_date", ""))[:10],
+                "status": str(row.get("evaluation_status", "pending")),
+                "future_5d": _fmt_pct(future_5d) if pd.notna(future_5d) else "--",
+            }
+        )
+    return rows
+
+
 def _collect_dashboard_data(config: dict, output_path: Path) -> dict[str, Any]:
     reports_dir = Path(config["output"]["reports_dir"])
     stats_dir = Path(config["output"].get("statistics_dir", "output/statistics"))
     trades_dir = Path(config["output"]["trades_dir"])
+    decisions_dir = Path(config["output"].get("decisions_dir", "output/decisions"))
     index_cache_dir = Path(config["data"]["cache_dir"]) / "index"
     index_reports_dir = reports_dir / "index"
+    decision_path = decisions_dir / "decision_memory.csv"
 
     indexes = []
     for item in _configured_indexes(config):
@@ -190,6 +250,8 @@ def _collect_dashboard_data(config: dict, output_path: Path) -> dict[str, Any]:
         "comparison_exists": comparison_path.exists(),
         "stock_report_count": _stock_report_count(reports_dir),
         "recent_stock_reports": _recent_stock_reports(reports_dir, output_path),
+        "decision_snapshot": _decision_snapshot(decision_path),
+        "recent_decisions": _recent_decisions(decision_path),
     }
 
 
@@ -271,9 +333,39 @@ def _build_recent_reports(data: dict[str, Any]) -> str:
     )
 
 
+def _build_decision_panel(data: dict[str, Any]) -> str:
+    snapshot = data["decision_snapshot"]
+    recent = data["recent_decisions"]
+    rows = ""
+    if recent:
+        rows = "\n".join(
+            f"""
+            <div class="decision-row">
+              <span>{html.escape(item["symbol"])}</span>
+              <strong>{html.escape(item["strategy"])}</strong>
+              <em>{html.escape(item["date"])}</em>
+              <b>{html.escape(item["future_5d"])}</b>
+            </div>
+            """
+            for item in recent
+        )
+    else:
+        rows = '<p class="empty">暂无信号复盘</p>'
+    return f"""
+      <div class="decision-metrics">
+        <div><span>信号</span><strong>{html.escape(str(snapshot.get("count", 0)))}</strong></div>
+        <div><span>完整</span><strong>{html.escape(str(snapshot.get("evaluated", 0)))}</strong></div>
+        <div><span>待评估</span><strong>{html.escape(str(snapshot.get("pending", 0)))}</strong></div>
+        <div><span>5日均值</span><strong>{html.escape(snapshot.get("avg_future_5d", "--"))}</strong></div>
+      </div>
+      <div class="mini-list">{rows}</div>
+    """
+
+
 def _build_html(data: dict[str, Any]) -> str:
     index_count = len(data["indexes"])
     strategy_count = len(data["strategies"])
+    decision_count = data["decision_snapshot"].get("count", 0)
     comparison_link = (
         f'<a class="primary-link" href="{html.escape(data["comparison_href"])}">策略横向对比</a>'
         if data["comparison_exists"]
@@ -390,6 +482,18 @@ def _build_html(data: dict[str, Any]) -> str:
     .mini-link span {{ font-weight: 900; }}
     .mini-link strong {{ font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
     .mini-link em {{ color: var(--muted); font-size: 12px; font-style: normal; }}
+    .decision-metrics {{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-bottom: 12px; }}
+    .decision-metrics div {{ border: 1px solid var(--line); background: #fbfcfe; padding: 10px; }}
+    .decision-metrics span {{ display: block; color: var(--muted); font-size: 12px; margin-bottom: 4px; }}
+    .decision-metrics strong {{ font-size: 18px; }}
+    .decision-row {{
+      display: grid; grid-template-columns: 72px 1fr 78px 72px; gap: 8px; align-items: center;
+      border: 1px solid var(--line); padding: 9px; background: #fbfcfe; font-size: 12px;
+    }}
+    .decision-row span {{ font-weight: 900; }}
+    .decision-row strong {{ overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+    .decision-row em {{ color: var(--muted); font-style: normal; }}
+    .decision-row b {{ text-align: right; }}
     .empty {{ color: var(--muted); margin: 0; }}
     [aria-disabled="true"] {{ cursor: default; pointer-events: none; opacity: .62; }}
     footer {{ margin-top: 30px; color: var(--muted); font-size: 12px; border-top: 1px solid var(--line); padding-top: 16px; }}
@@ -430,7 +534,7 @@ def _build_html(data: dict[str, Any]) -> str:
       <div class="kpi"><span>指数概览</span><strong>{index_count}</strong></div>
       <div class="kpi"><span>策略模块</span><strong>{strategy_count}</strong></div>
       <div class="kpi"><span>单标的报告</span><strong>{data["stock_report_count"]}</strong></div>
-      <div class="kpi"><span>策略对比</span><strong>{"可用" if data["comparison_exists"] else "缺失"}</strong></div>
+      <div class="kpi"><span>信号复盘</span><strong>{decision_count}</strong></div>
     </section>
 
     <section>
@@ -448,7 +552,9 @@ def _build_html(data: dict[str, Any]) -> str:
         </div>
       </div>
       <aside class="side-panel">
-        <h3>最近单标的报告</h3>
+        <h3>信号复盘</h3>
+        {_build_decision_panel(data)}
+        <h3 style="margin-top:18px;">最近单标的报告</h3>
         <div class="mini-list">
           {_build_recent_reports(data)}
         </div>
