@@ -81,6 +81,7 @@
 - 策略对比：`E:\anaconda3\envs\QYTX\python.exe main.py backtest compare --symbol 000001.SZ`
 - 单策略统计：`E:\anaconda3\envs\QYTX\python.exe main.py stats analyze --strategy rsi`
 - 多策略统计对比：`E:\anaconda3\envs\QYTX\python.exe main.py stats compare`
+- 运行实验配置：`E:\anaconda3\envs\QYTX\python.exe main.py experiment run experiments/sma_cross_baseline.yaml`
 - 流水线执行：`E:\anaconda3\envs\QYTX\python.exe main.py run "download; backtest --strategy rsi; report; stats compare"`
 - 自动化测试命令：`E:\anaconda3\envs\QYTX\python.exe -m unittest discover -s tests`
 - 语法检查命令：`E:\anaconda3\envs\QYTX\python.exe -m compileall main.py cli data engine strategy visual analysis decision`

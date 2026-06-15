@@ -178,6 +178,9 @@ python main.py index overview --all
 
 # 生成本地汇总导航面板
 python main.py dashboard
+
+# 运行一个可归档实验配置
+python main.py experiment run experiments/sma_cross_baseline.yaml
 ```
 
 默认报告输出到 `output/reports/index/{指数代码}_overview.html`，包含日K/周K/月K、MA5/10/20/60、成交量、MACD、KDJ、RSI，以及最新收盘、当日涨跌幅、近5日/20日收益、年初至今、20日最大回撤和波动率等概览卡片。
@@ -195,6 +198,48 @@ python main.py dashboard
 - **风险提示**：主动标注幸存者偏差、本地缓存缺失/过期、基准缺失、信号待评估和未来函数审计未接入等限制。
 
 这个面板只聚合已有本地产物，不会重新下载数据、不会运行回测，也不会改变任何 CSV 字段口径。
+
+### 实验配置化
+
+`experiment run` 用 YAML 固化一次研究任务，把输入配置、回测汇总、交易流水、权益曲线、单标的报告和 manifest 归档到独立目录，方便复现和比较。它复用现有 Backtrader 回测逻辑，但输出写入 `output/experiments/{experiment_id}/`，不会覆盖全局 `output/trades/` 下的批量汇总。
+
+示例：
+
+```bash
+python main.py experiment run experiments/sma_cross_baseline.yaml
+```
+
+示例配置：
+
+```yaml
+id: sma_cross_baseline
+strategy: sma_cross
+symbols:
+  - 000001.SZ
+start: "20210101"
+end: "20231231"
+benchmark: 000300.SH
+params:
+  fast: 5
+  slow: 20
+cost:
+  commission: 0.00025
+  stamp_duty: 0.001
+  slippage_perc: 0.001
+```
+
+输出结构：
+
+```text
+output/experiments/{experiment_id}/
+├── config.yaml      # 归档后的实验 YAML
+├── manifest.json    # 输入、输出、状态、耗时、错误和警告
+├── summary.csv      # 本次实验标的级绩效汇总
+├── trades/          # 实验内交易流水和权益曲线
+└── reports/         # 实验内单标的 HTML 报告
+```
+
+为避免误跑全市场，实验配置必须显式提供 `symbols` 或 `symbol`。`cost` 只允许覆盖现有回测成本字段；拼错字段会直接报错。
 
 ### 决策记忆和信号复盘
 
@@ -513,6 +558,8 @@ quant_yb/
 ├── engine/              ← 回测引擎相关代码
 ├── strategy/            ← 策略代码（你的买卖逻辑放在这里）
 ├── decision/            ← 决策记忆与信号复盘
+├── experiment/          ← 实验配置化运行与归档
+├── experiments/         ← 可复现实验 YAML 配置
 ├── analysis/            ← 数据统计分析相关代码
 ├── visual/              ← 图表生成相关代码
 ├── output/

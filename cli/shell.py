@@ -151,6 +151,10 @@ def _print_help():
     click.echo("    参数: --output (输出 HTML 路径，默认 output/reports/dashboard.html)")
     click.echo("    示例: dashboard")
     click.echo()
+    click.echo("  experiment      实验配置：从 YAML 运行可归档回测任务")
+    click.echo("    子命令: run")
+    click.echo("    示例: experiment run experiments/sma_cross_baseline.yaml")
+    click.echo()
     click.secho("  放量平台突破常用命令（可直接复制）:", fg="yellow", bold=True)
     click.echo("    1) 回测全市场:")
     click.echo("       backtest --strategy volume_platform_breakout")
@@ -575,6 +579,29 @@ def _cmd_dashboard(config: dict, **kwargs):
     click.secho(f"  汇总面板已生成: {out_path}", fg="green")
 
 
+def _cmd_experiment(config: dict, **kwargs):
+    sub = kwargs.get("sub") or "run"
+    if isinstance(sub, bool):
+        sub = "run"
+    sub = str(sub).strip().lower()
+    if sub != "run":
+        click.secho("  用法: experiment run <config.yaml>", fg="yellow")
+        return
+
+    config_path = kwargs.get("config_path") or kwargs.get("path")
+    if isinstance(config_path, bool) or not config_path:
+        click.secho("  请提供实验配置路径。示例: experiment run experiments/sma_cross_baseline.yaml", fg="red")
+        return
+
+    from experiment.runner import run_experiment
+
+    manifest = run_experiment(config, config_path)
+    counts = manifest.get("result_counts", {})
+    click.secho(f"  实验已完成: {manifest['id']} ({manifest['status']})", fg="green")
+    click.echo(f"  标的: {counts.get('succeeded', 0)}/{counts.get('requested', 0)} 成功")
+    click.echo(f"  输出目录: {manifest['output_dir']}")
+
+
 def _cmd_decision(config: dict, **kwargs):
     sub = kwargs.get("sub") or "summary"
     if isinstance(sub, bool):
@@ -726,6 +753,13 @@ def _execute_pipeline(config: dict, commands_text: str) -> None:
                 _cmd_stats(config, **sub_args)
             elif cmd == "dashboard":
                 _cmd_dashboard(config, **args)
+            elif cmd == "experiment":
+                sub = parts[1] if len(parts) > 1 else "run"
+                sub_args = _parse_args(parts[3:]) if len(parts) > 3 else {}
+                sub_args["sub"] = sub
+                if len(parts) > 2:
+                    sub_args["config_path"] = parts[2]
+                _cmd_experiment(config, **sub_args)
             else:
                 click.secho(f'  未知命令: "{cmd}"', fg="red")
                 if not ignore_error:
@@ -847,6 +881,13 @@ def run_interactive():
                 _cmd_stats(config, **sub_args)
             elif cmd == "dashboard":
                 _cmd_dashboard(config, **args)
+            elif cmd == "experiment":
+                sub = parts[1] if len(parts) > 1 else "run"
+                sub_args = _parse_args(parts[3:]) if len(parts) > 3 else {}
+                sub_args["sub"] = sub
+                if len(parts) > 2:
+                    sub_args["config_path"] = parts[2]
+                _cmd_experiment(config, **sub_args)
             else:
                 click.secho(f'  未知命令: "{cmd}"，输入 help 查看帮助。', fg="red")
         except KeyboardInterrupt:

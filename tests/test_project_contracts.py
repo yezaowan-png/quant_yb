@@ -7,6 +7,7 @@ import pandas as pd
 
 from decision.evaluator import evaluate_memory
 from decision.recorder import append_buy_signals, load_memory
+from experiment.runner import run_experiment
 from visual.dashboard import generate_dashboard
 
 
@@ -172,6 +173,72 @@ class ProjectContractsTest(unittest.TestCase):
             self.assertIn("风险提示", html)
             self.assertIn("20260102", html)
             self.assertNotIn("20260102.0", html)
+
+    def test_experiment_runner_archives_config_summary_manifest_and_report(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cache_dir = root / "cache"
+            cache_dir.mkdir()
+            output_dir = root / "output"
+            dates = pd.date_range("2026-01-01", periods=80, freq="B")
+            closes = [10 + i * 0.03 + (i % 9) * 0.08 for i in range(len(dates))]
+            pd.DataFrame(
+                {
+                    "date": dates.strftime("%Y%m%d"),
+                    "open": [v - 0.05 for v in closes],
+                    "high": [v + 0.12 for v in closes],
+                    "low": [v - 0.12 for v in closes],
+                    "close": closes,
+                    "volume": [100000 + i * 1000 for i in range(len(dates))],
+                }
+            ).to_csv(cache_dir / "000001.SZ.csv", index=False)
+
+            exp_config = root / "experiment.yaml"
+            exp_config.write_text(
+                """
+id: unit_sma_cross
+strategy: sma_cross
+symbols:
+  - 000001.SZ
+start: "20260101"
+end: "20260430"
+params:
+  fast: 3
+  slow: 8
+cost:
+  commission: 0.00025
+  stamp_duty: 0.001
+  slippage_perc: 0.001
+""".strip(),
+                encoding="utf-8",
+            )
+            config = {
+                "data": {"cache_dir": str(cache_dir)},
+                "backtest": {
+                    "initial_cash": 100000.0,
+                    "commission": 0.00025,
+                    "stamp_duty": 0.001,
+                    "min_commission": 5.0,
+                    "slippage_perc": 0.001,
+                    "enforce_price_limits": True,
+                    "limit_pct": 0.10,
+                    "volume_limit_ratio": 0.0,
+                    "volume_unit": 100,
+                },
+                "benchmark": {"enabled": False},
+                "parallel": {"backtest_workers": 1},
+                "output": {"trades_dir": str(output_dir / "trades")},
+            }
+
+            manifest = run_experiment(config, exp_config)
+            exp_dir = output_dir / "experiments" / "unit_sma_cross"
+
+            self.assertEqual(manifest["status"], "ready")
+            self.assertEqual(manifest["result_counts"]["succeeded"], 1)
+            self.assertTrue((exp_dir / "config.yaml").exists())
+            self.assertTrue((exp_dir / "summary.csv").exists())
+            self.assertTrue((exp_dir / "manifest.json").exists())
+            self.assertTrue((exp_dir / "reports" / "000001.SZ_sma_cross.html").exists())
 
 
 if __name__ == "__main__":

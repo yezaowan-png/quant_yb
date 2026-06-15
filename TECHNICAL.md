@@ -130,6 +130,56 @@ CLI 入口为 `python main.py index download/report/overview`，单指数使用 
 
 该面板只聚合已有输出，不重新下载数据、不运行回测、不改变任何 CSV 口径。页面中的策略收益、回撤、夏普、正收益占比等字段必须继续来自回测汇总 CSV 和 `compute_stats()`；不得在 dashboard 层重新定义绩效指标。
 
+### 实验配置化链路
+
+`python main.py experiment run experiments/sma_cross_baseline.yaml` 会调用 `experiment/runner.py::run_experiment()`，把一次研究任务从 YAML 配置转换为独立归档目录：
+
+```text
+experiments/{name}.yaml
+    │
+    ▼
+experiment.runner.run_experiment()
+    │  读取 config.yaml 的数据目录、回测默认值和输出根目录
+    │  应用实验 YAML 中的 strategy / symbols / date range / params / cost / benchmark
+    ▼
+BacktestRunner.run()
+    │  对每个显式 symbols 顺序回测
+    ▼
+output/experiments/{experiment_id}/
+    ├── config.yaml
+    ├── summary.csv
+    ├── manifest.json
+    ├── trades/
+    └── reports/
+```
+
+设计边界：
+
+- 实验配置必须显式提供 `symbols` 或 `symbol`，不允许默认全市场运行，避免误触发大批量任务。
+- 回测仍使用 `BacktestRunner.run()` 和现有策略加载约定，不改变成交价格、手续费模型、滑点、T+1、涨跌停或成交量限制逻辑。
+- `cost` 只允许覆盖 `backtest` 中已有的成本/约束字段：`initial_cash`、`commission`、`stamp_duty`、`min_commission`、`slippage_perc`、`enforce_price_limits`、`limit_pct`、`volume_limit_ratio`、`volume_unit`。未知字段直接报错。
+- 实验输出写入 `output/experiments/{experiment_id}/`，不会覆盖全局 `output/trades/_summary_{strategy}.csv`，也不会自动写入全局 `output/decisions/decision_memory.csv`。
+- `manifest.json` 记录实验输入、输出路径、开始/结束时间、运行状态、成功/失败标的数量、警告和错误；dashboard 会读取这些 manifest 展示最近实验。
+
+实验配置示例：
+
+```yaml
+id: sma_cross_baseline
+strategy: sma_cross
+symbols:
+  - 000001.SZ
+start: "20210101"
+end: "20231231"
+benchmark: 000300.SH
+params:
+  fast: 5
+  slow: 20
+cost:
+  commission: 0.00025
+  stamp_duty: 0.001
+  slippage_perc: 0.001
+```
+
 ### 决策记忆链路
 
 Decision Memory 是一个事后复盘层，目标是记录策略产生的买点，并在未来数据足够后评估这些买点之后的表现。它不改变策略信号、不参与下单、不改变 Backtrader 成交模型。

@@ -418,7 +418,7 @@ def _collect_dashboard_data(config: dict, output_path: Path) -> dict[str, Any]:
     stats_dir = Path(config["output"].get("statistics_dir", "output/statistics"))
     trades_dir = Path(config["output"]["trades_dir"])
     decisions_dir = Path(config["output"].get("decisions_dir", "output/decisions"))
-    experiments_dir = Path(config["output"].get("experiments_dir", "output/experiments"))
+    experiments_dir = Path(config["output"].get("experiments_dir") or (trades_dir.parent / "experiments"))
     index_cache_dir = Path(config["data"]["cache_dir"]) / "index"
     index_reports_dir = reports_dir / "index"
     decision_path = decisions_dir / "decision_memory.csv"
