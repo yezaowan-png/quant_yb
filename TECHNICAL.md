@@ -7,7 +7,7 @@
 | CLI 框架 | click | 命令行参数解析、交互式命令 REPL |
 | 数据源 | tushare | A股日K线行情数据 API、股票列表 |
 | 回测引擎 | backtrader | 事件驱动回测框架（Cerebro 架构） |
-| 图表 | pyecharts | 基于 ECharts 的 Python 可视化库 |
+| 图表 | pyecharts / ECharts | pyecharts 用于分析报告图表；回测报告改用自研 JS 渲染器直连 ECharts CDN |
 | 数据处理 | pandas, numpy | DataFrame 操作、数值计算 |
 | 配置 | pyyaml | YAML 配置文件解析 |
 
@@ -83,9 +83,237 @@ generate_report()
 output/reports/{symbol}_{strategy}.html       ← 可视化报告
 ```
 
+### 数据 Provider 抽象
+
+阶段 6 后，`DataDownloader` 不再直接持有 Tushare API 调用细节，而是通过 `data/providers/` 下的 provider 接口取数据：
+
+```text
+data/providers/
+    base.py              # MarketDataProvider 接口和标准 OHLC 清洗工具
+    tushare_provider.py  # 默认 provider，保持原 Tushare 行为
+    local_csv_provider.py# 离线 provider，只读取本地 cache CSV
+    akshare_provider.py  # 占位 provider，尚未启用真实 AKShare 接口
+```
+
+责任边界：
+
+- Provider 负责返回标准化 DataFrame：`date/open/high/low/close/volume/amount`；指数数据可额外包含 `ts_code/pre_close/change/pct_chg`。
+- `DataDownloader` 继续负责缓存命中、缓存合并保存、批量进度、限流对象传入和 CLI 输出。
+- `data.provider` 默认值为 `tushare`，因此现有 `python main.py data download ...` 命令行为保持兼容。
+- `local_csv` 只读本地缓存，适合无网络、无 token 的测试和复盘；它不会补齐缺失行情。
+- `akshare` 目前只固定接口形状，显式报错，不会在未验证字段口径前 silently fallback。
+
 ---
 
 ## 各模块实现思路
+
+### 指数概览链路
+
+第一阶段指数概览覆盖主要宽基和风格指数，指数清单配置在 `config.yaml::index_overview.indexes`，和股票回测链路保持隔离：
+
+```
+Tushare index_daily
+    │
+    ▼
+DataDownloader.download_index()
+    │ 清洗字段：date/open/high/low/close/pre_close/change/pct_chg/volume/amount
+    ▼
+data/cache/index/{symbol}.csv
+    │
+    ├─ analysis/index_overview.py 生成趋势、动量、震荡和风险概览
+    │
+    ▼
+visual/index_report.py
+    │ 生成日K/周K/月K + MACD/KDJ/RSI HTML
+    ▼
+output/reports/index/{symbol}_overview.html
+```
+
+CLI 入口为 `python main.py index download/report/overview`，单指数使用 `--symbol`，第一阶段批量生成使用 `--all`。`overview` 会先调用 `download_index()` 更新缓存，再调用 `generate_index_report()` 生成 HTML；`--all` 会按配置顺序逐个处理 `000001.SH`、`399001.SZ`、`399006.SZ`、`000688.SH`、`000300.SH`、`000905.SH`、`000852.SH`、`000985.SH`。该链路不读取交易流水、不生成权益曲线，也不改变现有回测 CSV 字段。
+
+### 汇总面板链路
+
+`python main.py dashboard` 会调用 `visual/dashboard.py::generate_dashboard()`，扫描本地输出目录并生成 `output/reports/dashboard.html`。阶段 4 后该页面定位为“研究总控面板”，用于把市场环境、数据健康、策略表现、信号复盘、实验归档和最近报告放在同一个入口查看。
+
+面板只读本地产物：
+
+- 指数概览：读取 `config.yaml::index_overview.indexes`、`data/cache/index/{symbol}.csv` 和 `output/reports/index/{symbol}_overview.html`。
+- 市场温度：从指数缓存最新一行读取 `pct_chg`，计算指数平均涨跌、上涨/下跌数量、最强/最弱指数；无指数缓存时显示待生成。
+- 数据健康：扫描 `data/cache/*.csv`、`data/cache/index/*.csv`、`output/reports/index/*.html`，展示股票缓存数量、最新股票缓存日期、过期缓存数量、指数缓存覆盖度和指数报告数量。
+- 策略排行榜：读取 `output/trades/_summary_{strategy}.csv`，复用 `analysis/analyzer.py::compute_stats()`，按全市场平均收益排序，避免 dashboard 另起一套绩效口径。
+- 策略汇总：按 `strategy/*.py` 自动发现策略模块，链接到 `output/statistics/analysis_{strategy}.html`，展示股票数、平均收益、交易股平均收益、正收益比例、夏普、回撤和报告生成状态。
+- 策略横向对比：若存在 `output/statistics/comparison.html`，顶部提供入口；不存在时显示为待生成状态。
+- 信号复盘：读取 `output/decisions/decision_memory.csv`，展示信号数量、已评估/待评估数量、最近信号日期、5 日未来收益均值和 5 日超额收益均值。
+- 最近实验：扫描 `output/experiments/*/manifest.json` 和实验目录的 `reports/` 子目录，用于展示最近实验归档入口。
+- 单标的报告：扫描 `output/reports/*.html`，排除 `dashboard.html`，展示最近生成的单标的报告入口。
+- 风险提示：根据本地状态提示幸存者偏差、缓存日期不齐、基准缓存缺失、信号待评估、未来函数审计尚未接入等限制。
+
+该面板只聚合已有输出，不重新下载数据、不运行回测、不改变任何 CSV 口径。页面中的策略收益、回撤、夏普、正收益占比等字段必须继续来自回测汇总 CSV 和 `compute_stats()`；不得在 dashboard 层重新定义绩效指标。
+
+### 实验配置化链路
+
+`python main.py experiment run experiments/sma_cross_baseline.yaml` 会调用 `experiment/runner.py::run_experiment()`，把一次研究任务从 YAML 配置转换为独立归档目录：
+
+```text
+experiments/{name}.yaml
+    │
+    ▼
+experiment.runner.run_experiment()
+    │  读取 config.yaml 的数据目录、回测默认值和输出根目录
+    │  应用实验 YAML 中的 strategy / symbols / date range / params / cost / benchmark
+    ▼
+BacktestRunner.run()
+    │  对每个显式 symbols 顺序回测
+    ▼
+output/experiments/{experiment_id}/
+    ├── config.yaml
+    ├── summary.csv
+    ├── manifest.json
+    ├── trades/
+    └── reports/
+```
+
+设计边界：
+
+- 实验配置必须显式提供 `symbols` 或 `symbol`，不允许默认全市场运行，避免误触发大批量任务。
+- 回测仍使用 `BacktestRunner.run()` 和现有策略加载约定，不改变成交价格、手续费模型、滑点、T+1、涨跌停或成交量限制逻辑。
+- `cost` 只允许覆盖 `backtest` 中已有的成本/约束字段：`initial_cash`、`commission`、`stamp_duty`、`min_commission`、`slippage_perc`、`enforce_price_limits`、`limit_pct`、`volume_limit_ratio`、`volume_unit`。未知字段直接报错。
+- 实验输出写入 `output/experiments/{experiment_id}/`，不会覆盖全局 `output/trades/_summary_{strategy}.csv`，也不会自动写入全局 `output/decisions/decision_memory.csv`。
+- `manifest.json` 记录实验输入、输出路径、开始/结束时间、运行状态、成功/失败标的数量、警告和错误；dashboard 会读取这些 manifest 展示最近实验。
+
+实验配置示例：
+
+```yaml
+id: sma_cross_baseline
+strategy: sma_cross
+symbols:
+  - 000001.SZ
+start: "20210101"
+end: "20231231"
+benchmark: 000300.SH
+params:
+  fast: 5
+  slow: 20
+cost:
+  commission: 0.00025
+  stamp_duty: 0.001
+  slippage_perc: 0.001
+```
+
+### 决策记忆链路
+
+Decision Memory 是一个事后复盘层，目标是记录策略产生的买点，并在未来数据足够后评估这些买点之后的表现。它不改变策略信号、不参与下单、不改变 Backtrader 成交模型。
+
+```
+backtest scan / 批量 backtest run
+    │ 产生近 N 个交易日买点
+    ▼
+output/signals/buy_signals_{strategy}_{date}.csv
+    │
+    ├─ engine/runner.py::_export_buy_signals()
+    │     自动调用 decision.recorder.append_buy_signals()
+    ▼
+output/decisions/decision_memory.csv
+    │
+    ├─ python main.py decision evaluate
+    │     用本地行情缓存计算未来 5/10/20 个实际交易日收益
+    ▼
+dashboard / decision summary
+```
+
+#### 记录阶段
+
+`decision/recorder.py` 负责稳定记录信号：
+
+- `signal_id` 由 `symbol + strategy + signal_date + signal_type + params_json` 生成，用于去重。
+- `params_json` 保存策略参数快照，避免不同参数组合的同日信号混在一起。
+- `market_context_json` 预留给后续市场环境、指数状态、行业状态等上下文。
+- 记录时不计算未来收益，未来收益字段保持空值，`evaluation_status` 默认为 `pending`。
+
+这一步可以由两种方式触发：
+
+```bash
+# 扫描或批量回测后自动写入
+python main.py backtest scan --strategy sma_cross --days 5
+
+# 手动把最近一次买点扫描 CSV 写入
+python main.py decision record --strategy sma_cross
+```
+
+#### 评估阶段
+
+`decision/evaluator.py` 只读取本地缓存，不联网：
+
+1. 读取 `output/decisions/decision_memory.csv`。
+2. 对每条信号找到 `signal_date` 当天或之后的第一个交易日。
+3. 以该交易日收盘价为起点，计算未来第 5、10、20 个实际交易日的收益。
+4. 如果 `benchmark.enabled=true` 且本地存在基准指数缓存，则计算同期基准收益和超额收益。
+5. 根据数据完整程度更新状态：
+   - `evaluated`：所有窗口都有未来数据。
+   - `partial`：部分窗口有未来数据。
+   - `pending_future_data`：未来数据不足。
+   - `missing_symbol_data`：找不到标的缓存。
+
+命令：
+
+```bash
+python main.py decision evaluate --strategy sma_cross --horizons 5,10,20
+python main.py decision summary --strategy sma_cross
+```
+
+#### 未来函数边界
+
+Decision Memory 中的 `future_*`、`benchmark_*` 和 `excess_*` 字段只能用于事后复盘：
+
+- 策略类不得读取 `output/decisions/decision_memory.csv`。
+- 回测信号不得依赖未来收益字段。
+- dashboard 只展示已经生成的复盘结果，不反向影响任何策略。
+- 若未来数据不足，字段保留空值，不用估算值填充。
+
+这个设计可以帮助分析“信号有没有用”，但不会改变“信号如何产生”。
+
+### Lookahead Audit 未来函数审计链路
+
+`python main.py audit lookahead --strategy sma_cross` 会调用 `audit/lookahead.py::run_lookahead_audit()`，对 `strategy/` 源码做启发式静态扫描，并输出：
+
+```text
+output/audit/lookahead_audit_{strategy}.csv
+output/audit/lookahead_audit_{strategy}.html
+```
+
+第一版检查项：
+
+- `positive_bar_index`：命中 `data.open/high/low/close/volume[正数]`，Backtrader 中正向索引通常表示未来 bar。
+- `negative_shift`：命中 `.shift(-N)`，可能把未来行移到当前行。
+- `future_iloc`：命中 `.iloc[i + N]`，循环中可能读取未来行。
+- `strategy_reads_outputs`：策略源码引用 `output/`、`reports/`、`statistics/`、`decisions/` 等事后产物。
+- `current_bar_window`：命中 `range(0, ...)`，需要确认历史窗口没有把当前 bar 纳入基准。
+- `full_sample_extrema`：命中 `.max()`、`.min()`、`.mean()`、`.std()`，若作用于全样本 DataFrame 可能产生泄露。
+
+注意：该审计只是一层防线，命中项需要人工复核；未命中不代表完全证明无未来函数。平台突破等策略仍需要结合具体历史窗口实现逐行检查。
+
+### 组合目标权重链路
+
+`python main.py portfolio build --signals output/signals/buy_signals_sma_cross_YYYYMMDD.csv` 会调用 `portfolio/allocator.py::build_target_weights()`，从买点信号生成研究用目标权重：
+
+```text
+output/signals/buy_signals_{strategy}_{date}.csv
+    │
+    ▼
+portfolio.allocator.build_target_weights()
+    │  equal / inverse_vol
+    │  max_weight cap
+    ▼
+output/portfolio/target_weights_YYYYMMDD.csv
+```
+
+设计边界：
+
+- 组合层只生成目标权重 CSV，不下单、不改变 Backtrader 回测、不改变策略信号。
+- `equal` 不依赖行情缓存；`inverse_vol` 读取 `data/cache/{symbol}.csv` 的收盘价计算近 N 日年化波动率。
+- 缓存缺失、历史不足或波动率无效时，`data_status` 会标注问题；若无法完成波动率倒数分配，会降级为等权。
+- 单股权重上限优先于总仓位。如果候选股票数太少导致无法满仓，实际 `target_weight` 总和会低于 `gross_exposure`。
+- dashboard 读取最新 `output/portfolio/target_weights_*.csv`，只展示研究产物入口和集中度摘要，不把权重反向用于策略。
 
 ### `main.py` — 程序入口
 
@@ -102,6 +330,8 @@ def cli(ctx):
 
 这样设计的好处：同一个入口，既能 `python main.py` 进入 REPL，也能 `python main.py data download ...` 直接执行命令。后者适合脚本化、批量处理场景。
 
+**`run` 命令**：注册为 `@cli.command("run")`，接受命令字符串（分号/换行分隔）或 `--file` 脚本文件，调用 `shell.py` 中的 `_execute_pipeline()` 按顺序执行。支持 `!` 前缀忽略某条命令的失败。
+
 ---
 
 ### `cli/shell.py` — 交互式命令 REPL
@@ -112,6 +342,7 @@ def cli(ctx):
 2. **命令路由**：根据第一个词路由到对应的处理函数（`_cmd_download`、`_cmd_backtest`、`_cmd_scan`、`_cmd_report`），支持简写（如 `dl` → download、`bt` → backtest、`rp` → report）。
 3. **异常保护**：每个命令用 `try/except` 包裹，出错时打印错误信息但不退出程序。
 4. **自动发现**：`_list_cached_symbols()` 扫描 `data/cache/*.csv` 自动列出已下载的股票；`_list_strategies()` 扫描 `strategy/*.py` 自动列出可用策略。
+5. **命令流水线**：`_execute_pipeline()` 接受分号或换行分隔的命令字符串，按序逐条执行。遇到错误时默认中止，可用 `!` 前缀忽略某条失败继续。`_cmd_run()` 在交互式 Shell 中暴露该能力（支持字符串参数和 `--file` 脚本文件）。CLI 中对应的 `run` 命令注册在 `main.py`。
 
 **为什么从菜单改为命令 REPL？**
 菜单模式需要一级一级输入，操作效率低，且无法组合参数。命令模式一次输入就能完成操作（如 `download --symbol 000001.SZ --start 20210101 --force`），更符合程序员使用习惯，也方便脚本化。
@@ -139,9 +370,11 @@ def cli(ctx):
 2. **`backtest scan`**：
    - 新增命令，对所有已缓存股票运行策略，检测近N日买点
    - 结果导出到 `output/signals/buy_signals_{策略名}_{日期}.csv`
+   - 若 `decision_memory.enabled=true`，会同步写入 `output/decisions/decision_memory.csv`
 3. **`backtest report`**：
    - 自动查找对应的交易流水文件和权益文件
    - 如果文件不存在给出明确提示（比如"请先执行 backtest run"）
+4. **批量报告并行**：`_run_batch_reports()` 使用 `ThreadPoolExecutor`（而非 `ProcessPoolExecutor`）并行生成 HTML 报告。线程池避免 Windows 上多进程 spawn 导致的 OpenBLAS 内存耗尽和进程挂起问题。模块顶部在 import pandas 之前设置 `OPENBLAS_NUM_THREADS=1` 等环境变量，防止子线程中 OpenBLAS 多线程竞争。
 
 ---
 
@@ -195,6 +428,8 @@ def cli(ctx):
 7. **信号过滤**：`_filter_recent_signals()` 根据数据的实际交易日历（而非自然日），取最后 N 个交易日作为判断窗口。
 
 8. **动态加载策略**：`load_strategy_class()` 使用 `importlib.import_module()` 动态加载策略模块。命名约定：文件名 `sma_cross` → 类名 `SmaCrossStrategy`。
+
+9. **多周期 feed 试点**：策略类若声明 `REQUIRES_WEEKLY = True`，`BacktestRunner.run()` 会在日线 data0 之外，通过 `cerebro.resampledata()` 从同一份日线 DataFrame 生成周线 data1。默认策略不声明该属性，因此原有单周期策略仍只接收一个日线 feed。
 
 **回撤计算逻辑**：
 ```python
@@ -260,6 +495,8 @@ def next(self):
 - 卖出时清仓（size=pos），避免分批卖出复杂度
 
 **买点追踪**：`buy_signal_dates` 列表记录所有出现买入信号的日期（无论是否实际成交），用于后续的买点扫描功能。这比只查交易记录更准确，因为当已有持仓时买入信号不会产生新的交易。
+
+**多周期下单边界**：`BaseStrategy` 默认只对 `trade_data_index=0` 的 feed 下单。多周期策略可以读取周线、月线等辅助 feed，但买卖委托仍落在日线 data0 上，避免在 resample 后的周线 bar 上误成交。
 
 **交易记录**：通过覆写 `notify_order()` 和 `notify_trade()` 两个回调：
 - `notify_order`：订单成交时记录买卖信息（日期、方向、价格、数量）
@@ -460,6 +697,276 @@ $$RSI = 100 - \frac{100}{1 + RS}$$
 
 ---
 
+### 7. 放量平台突破策略 (volume_platform_breakout) — `strategy/volume_platform_breakout.py`
+
+**核心思想**：用今天之前的历史 K 线识别窄幅整理平台，等待价格放量向上突破，并用 MA20 趋势过滤减少假突破。
+
+该策略刻意把“平台识别”和“突破确认”分成两部分：
+- 平台识别只使用历史窗口，即 `[-1]` 到 `[-lookback]`，不包含今天。
+- 突破确认使用今天的收盘价和成交量，即 `[0]`。
+
+这样可以避免前视偏差。如果把今天的 high 放进平台上沿，突破当天的高点会抬高 `upper`，导致突破判断被污染，甚至出现“用今天定义今天是否突破”的逻辑错误。
+
+**参数**：
+- `lookback=60`：平台识别回看交易日数
+- `max_range_pct=0.20`：平台最大振幅
+- `touch_tolerance=0.06`：上下沿触碰容忍度
+- `min_upper_touches=2` / `min_lower_touches=2`：上下沿最少触碰次数
+- `breakout_pct=0.02`：突破上沿确认幅度
+- `volume_period=30` / `volume_multiplier=1.3`：放量确认条件
+- `ma_slope_days=1`：MA20 向上确认天数
+- `platform_sell_tolerance=0.05`：跌破买入平台上沿卖出的容忍度
+- `stop_loss_pct=0.10`：相对实际买入成交价的止损比例
+
+#### 平台定义
+
+对每个交易日 `t`，平台窗口为：
+
+$$[t-lookback, t-1]$$
+
+平台上沿：
+
+$$upper_t = \max(high_{t-lookback}, ..., high_{t-1})$$
+
+平台下沿：
+
+$$lower_t = \min(low_{t-lookback}, ..., low_{t-1})$$
+
+平台振幅：
+
+$$range\_pct_t = \frac{upper_t - lower_t}{lower_t}$$
+
+当 `range_pct_t <= max_range_pct` 时，认为平台足够紧凑。
+
+#### 边界触碰次数
+
+上沿触碰条件：
+
+$$high_i \ge upper_t \times (1 - touch\_tolerance)$$
+
+下沿触碰条件：
+
+$$low_i \le lower_t \times (1 + touch\_tolerance)$$
+
+触碰次数用于过滤“只有一次尖峰或一次探底”的不稳定区间。默认要求上下沿都至少触碰 2 次，表示平台压力位和支撑位都被市场反复确认过。
+
+#### 突破与放量确认
+
+突破条件：
+
+$$close_t > upper_t \times (1 + breakout\_pct)$$
+
+放量条件：
+
+$$volume_t > SMA(volume, volume\_period)_{t-1} \times volume\_multiplier$$
+
+均量计算同样排除今天，使用 `data.volume[-1]` 到 `data.volume[-volume_period]`。这样今日成交量只作为突破当天的确认信号。
+
+#### 趋势过滤
+
+策略额外要求：
+
+$$close_t > MA20_t$$
+
+$$MA20_t > MA20_{t-ma\_slope\_days}$$
+
+这两条用于确认突破发生在短中期转强环境里，而不是均线仍然走弱时的下跌反弹。
+
+**买入规则**：
+1. 平台上沿 `upper` 使用过去 `lookback` 日 high 的最高值，平台下沿 `lower` 使用过去 `lookback` 日 low 的最低值。
+2. 平台计算排除今天，只使用 `data.high[-1]` 到 `data.high[-lookback]`、`data.low[-1]` 到 `data.low[-lookback]`。
+3. 平台振幅 `(upper - lower) / lower <= max_range_pct`。
+4. 上沿触碰次数 `high >= upper * (1 - touch_tolerance)` 不少于 `min_upper_touches`。
+5. 下沿触碰次数 `low <= lower * (1 + touch_tolerance)` 不少于 `min_lower_touches`。
+6. 今日收盘价 `close > upper * (1 + breakout_pct)`。
+7. 今日成交量大于过去 `volume_period` 日均量的 `volume_multiplier` 倍。
+8. 趋势过滤：`close > MA20`，且 `MA20[0] > MA20[-ma_slope_days]`。
+
+**卖出规则**：
+- 收盘价跌破 MA20
+- 或收盘价跌破买入时记录的平台上沿的 95%，即 `entry_upper * (1 - platform_sell_tolerance)`
+- 或收盘价相对实际买入成交价跌幅达到 `stop_loss_pct`
+
+#### 实现细节
+
+**文件**：`strategy/volume_platform_breakout.py`
+**类名**：`VolumePlatformBreakoutStrategy(BaseStrategy)`
+
+**核心状态变量**：
+- `self.ma20[data]`：20 日均线，用于趋势过滤和卖出判断
+- `self._entry_upper[data]`：买入信号出现时的平台上沿。卖出时判断是否跌回该平台上沿下方
+- `self._entry_price[data]`：实际买入成交价。卖出时用于计算固定止损
+
+**为什么要保存 `_entry_upper`**：
+
+平台上沿每天都会变化。如果卖出时重新计算平台上沿，可能会用新的平台边界替代买入时的突破位，导致突破失败判断漂移。因此策略在买入信号成立时记录当时的 `upper`，后续平台跌破只对比这个入场平台。
+
+**为什么要保存 `_entry_price`**：
+
+买入信号通常在收盘后产生，实际成交发生在下一根 K 线。策略通过 `notify_order()` 记录真实成交价，而不是用信号日收盘价估算止损价。固定止损阈值为：
+
+$$entry\_price \times (1 - stop\_loss\_pct)$$
+
+**为什么持仓时 `_next_buy_signal()` 直接返回 False**：
+
+`BaseStrategy.next()` 会在每个 bar 都调用 `_next_buy_signal()`，即使已经持仓也会先检查买入信号。新策略在持仓期间不再刷新 `_entry_upper`，避免后续再次出现突破形态时覆盖原始入场平台。
+
+**历史长度要求**：
+
+策略至少需要：
+
+```python
+max(lookback, volume_period, 20 + ma_slope_days)
+```
+
+个交易日以上的数据，才能同时满足平台识别、均量计算、MA20 和 MA20 斜率判断。
+
+**Backtrader 索引约定**：
+- `data.close[0]`：今天
+- `data.close[-1]`：昨天
+- `data.high[-lookback]`：平台窗口内最早一天
+
+本策略的平台和均量都从 `-1` 开始取值，确保没有前视偏差。
+
+#### 参数调优方向
+
+| 目标 | 推荐调整 |
+|------|----------|
+| 信号太少 | 提高 `max_range_pct`，降低 `volume_multiplier`，降低 `breakout_pct` |
+| 假突破太多 | 提高 `volume_multiplier`，提高 `min_upper_touches`，提高 `breakout_pct` |
+| 买点太滞后 | 降低 `breakout_pct`，或缩短 `lookback` |
+| 平台太松散 | 降低 `max_range_pct` |
+| 回踩平台就被过早卖出 | 提高 `platform_sell_tolerance` |
+| 平台跌破后卖出太慢 | 降低 `platform_sell_tolerance` |
+| 固定止损太宽 | 降低 `stop_loss_pct` |
+| 固定止损太容易触发 | 提高 `stop_loss_pct` |
+
+---
+
+### 8. 多周期放量趋势策略 (multi_timeframe_volume_trend) — `strategy/multi_timeframe_volume_trend.py`
+
+#### 核心思想
+
+该策略是多周期 Backtrader feed 的第一版试点：
+
+- 日线 data0 负责成交、突破、均线和均量判断。
+- 周线 data1 由 `BacktestRunner.run()` 使用 `cerebro.resampledata()` 从日线生成。
+- 周线只做趋势过滤，不直接下单。
+
+#### 买入规则
+
+1. 周线历史长度大于 `weekly_ma`。
+2. 周线收盘价高于周线均线，且当前周线收盘价不低于上一根周线收盘价。
+3. 日线历史长度大于 `max(slow_ma, breakout_lookback, volume_period)`。
+4. 当前日线收盘价突破今天之前 `breakout_lookback` 个交易日最高价。
+5. 日线快均线高于慢均线，当前收盘价高于快均线。
+6. 当前成交量大于日线均量的 `volume_multiplier` 倍。
+
+#### 卖出规则
+
+- 日线收盘价跌破慢均线。
+- 或周线收盘价跌破周线均线。
+- 或相对实际买入成交价跌幅达到 `stop_loss_pct`。
+
+#### 未来函数边界
+
+- 日线突破基准使用 `data.high[-1]` 到历史窗口，不包含当前 bar 的高点。
+- 周线 feed 由 Backtrader resample 生成，策略只能读取当前已形成的周线 bar 及历史周线 bar。
+- `BaseStrategy` 默认只对 `trade_data_index=0` 下单，因此周线 data1 不会触发买卖委托。
+- 该策略仍复用 A 股手续费、滑点、涨跌停、成交量限制、T+1 和交易流水导出逻辑。
+
+---
+
+### `cli/stats_cli.py` — 数据统计命令
+
+**实现思路**：
+
+注册 `stats` 命令组，包含两个子命令：
+- `stats analyze --strategy <name>` — 加载 `_summary_*.csv` 汇总数据，生成单策略全市场画像 HTML 报告
+- `stats compare` — 加载所有可用策略的汇总数据，生成多策略横向对比 HTML 报告
+
+数据来源于 `output/trades/_summary_{strategy}.csv`（批量回测时自动生成），无需重新运行回测。报告输出到 `output/statistics/` 目录。
+
+**分析指标计算**（见 `analysis/analyzer.py`）：
+- 收益率分布（histogram binning）
+- 风险收益散点数据（return vs max_dd）
+- TOP/BOTTOM 排行
+- 多策略雷达图归一化（Min-Max 归一化到 0-100，回撤维度反转）
+- Spearman 秩相关系数矩阵（基于同股票跨策略收益率）
+
+#### 策略画像统计卡片字段
+
+策略画像页面由 `analysis/report.py::build_analyze_page()` 生成，卡片数据来自 `analysis/analyzer.py::compute_stats()`。`compute_stats()` 的输入是批量回测生成的 `output/trades/_summary_{strategy}.csv`。
+
+单只股票回测的核心字段由 `engine/runner.py::BacktestRunner._build_stats()` 生成：
+
+| CSV 字段 | 单股含义 | 计算来源 |
+|----------|----------|----------|
+| `initial_cash` | 初始资金 | `config.yaml` 中 `backtest.initial_cash` |
+| `final_value` | 回测结束后的账户权益 | `cerebro.broker.getvalue()` |
+| `total_return_pct` | 单股总收益率 | `(final_value - initial_cash) / initial_cash * 100` |
+| `annual_return_pct` | 单股年化收益率 | `(final_value / initial_cash) ** (252 / trading_days) - 1`，再乘以 100 |
+| `annual_volatility_pct` | 单股年化波动率 | `equity.pct_change().std() * sqrt(252) * 100` |
+| `calmar_ratio` | 单股 Calmar 比率 | `annual_return_pct / max_drawdown_pct` |
+| `sortino_ratio` | 单股 Sortino 比率 | 日权益收益均值 / 下行收益标准差 × `sqrt(252)`；下行波动不足时为 0 |
+| `profit_factor` | Profit Factor | 平仓盈利总额 / 平仓亏损绝对值；无亏损且有盈利时留空，避免写入无限值 |
+| `gross_profit` / `gross_loss` | 平仓盈利/亏损总额 | 来自策略交易流水中 SELL 记录的 `pnl` |
+| `avg_trade_pnl` | 平均平仓盈亏 | SELL 记录 `pnl` 的均值 |
+| `best_trade_pnl` / `worst_trade_pnl` | 单笔最佳/最差平仓盈亏 | SELL 记录 `pnl` 的最大/最小值 |
+| `longest_win_streak` / `longest_loss_streak` | 最长连续盈利/亏损次数 | 按 SELL 记录 `pnl` 顺序统计 |
+| `avg_exposure_pct` | 平均持仓暴露 | `EquityCurveAnalyzer` 逐 bar 记录的持仓市值 / 权益 |
+| `total_trades` | 单股完整交易次数 | Backtrader `TradeAnalyzer` 的盈利交易数 + 亏损交易数 |
+| `win_trades` | 盈利交易次数 | Backtrader `TradeAnalyzer` |
+| `lose_trades` | 亏损交易次数 | Backtrader `TradeAnalyzer` |
+| `win_rate_pct` | 单股胜率 | `win_trades / total_trades * 100`；无交易时为 0 |
+| `sharpe_ratio` | 单股夏普比率 | Backtrader `SharpeRatio` 分析器，`riskfreerate=0.03` |
+| `max_drawdown_pct` | 单股最大回撤 | Backtrader `DrawDown` 分析器 |
+| `max_drawdown_days` | 最大回撤持续长度 | Backtrader `DrawDown` 分析器 |
+| `start_date` / `end_date` | 回测起止日期 | K 线数据的最小/最大日期 |
+| `trading_days` | 权益曲线交易日数 | `EquityCurveAnalyzer` 记录的 bar 数 |
+| `benchmark_return_pct` | 基准同期收益率 | 基准指数缓存存在时计算，例如 `000300.SH` |
+| `excess_return_pct` | 超额收益率 | `total_return_pct - benchmark_return_pct` |
+| `information_ratio` | 信息比率 | 主动收益均值 / 主动收益标准差 × `sqrt(252)` |
+
+策略画像卡片字段在全市场维度上进一步聚合：
+
+| 卡片文案 | `compute_stats()` 字段 | 计算方式 |
+|----------|------------------------|----------|
+| 分析股票数 | `count` | `len(df)`，即 summary CSV 行数 |
+| 有交易股票 | `active_count` / `active_ratio` | `total_trades > 0` 的行数；占比 = `active_count / count * 100` |
+| 平均收益率 | `avg_return` | `mean(total_return_pct)`，包含无交易股票 |
+| 平均年化收益 | `avg_annual_return` | `mean(annual_return_pct)`，包含无交易股票 |
+| 交易股平均收益 | `avg_active_return` | 只对 `total_trades > 0` 的股票计算 `mean(total_return_pct)` |
+| 交易股平均年化 | `avg_active_annual_return` | 只对 `total_trades > 0` 的股票计算 `mean(annual_return_pct)` |
+| 平均年化波动 | `avg_annual_volatility` | `mean(annual_volatility_pct)` |
+| 平均超额收益 | `avg_excess_return` | `mean(excess_return_pct)`；如果没有基准列则默认为 0 |
+| 平均信息比率 | `avg_information_ratio` | `mean(information_ratio)`；如果没有基准列则默认为 0 |
+| 中位数收益率 | `median_return` | `median(total_return_pct)` |
+| 正收益比例 | `positive_ratio` | `count(total_return_pct > 0) / count * 100` |
+| 平均夏普 | `avg_sharpe` | `mean(sharpe_ratio)` |
+| 平均 Sortino | `avg_sortino` | `mean(sortino_ratio)`；旧 summary 没有该列时默认为 0 |
+| 平均 Calmar | `avg_calmar` | `mean(calmar_ratio)` |
+| 平均 Profit Factor | `avg_profit_factor` | `mean(profit_factor)`，自动忽略空值和无限值 |
+| 平均最大回撤 | `avg_max_dd` | `mean(max_drawdown_pct)` |
+| 回撤持续天数 | `avg_max_drawdown_days` | `mean(max_drawdown_days)` |
+| 最长连赢/连亏 | `max_win_streak` / `max_loss_streak` | 全市场样本中 `longest_win_streak` / `longest_loss_streak` 的最大值 |
+| 平均交易 PnL | `avg_trade_pnl` | `mean(avg_trade_pnl)` |
+| 平均胜率 | `avg_win_rate` | `mean(win_rate_pct)` |
+| 平均交易次数 | `avg_trades` | `mean(total_trades)` |
+
+注意事项：
+
+1. `avg_return`、`avg_annual_return`、`avg_annual_volatility` 都包含无交易股票。无交易股票的收益、年化收益和波动通常为 0，因此信号很少的策略会被 0 值明显稀释。
+2. `avg_active_return` 和 `avg_active_annual_return` 排除了无交易股票，更接近“策略真正出手后的平均效果”。
+3. `median_return` 用于观察典型股票表现。如果平均收益很高但中位数很低，通常说明少数大赢家拉高了均值。
+4. `positive_ratio` 统计的是全部股票中的正收益比例，不只统计有交易股票。
+5. `avg_win_rate` 是“先算每只股票自己的胜率，再取平均”，不是把所有交易混在一起算总体胜率。
+6. `avg_excess_return` 和 `avg_information_ratio` 依赖基准指数缓存。若 `data/cache/{benchmark.symbol}.csv` 不存在，相关字段不会出现在 summary 中，统计报告会显示 0。
+7. Sortino、Profit Factor、连续盈亏等字段是阶段 2 新增字段；旧的 `_summary_*.csv` 没有这些列时，统计页会保持兼容并显示 0 或跳过对应图表。重新执行批量回测后，新 summary 才会完整携带这些字段。
+8. Profit Factor 使用平仓交易流水中的 `pnl`，不改变 Backtrader 成交价格、手续费、滑点、涨跌停、成交量限制或 T+1 规则。
+
+---
+
 ### `visual/kline_chart.py` — K线 + 均线 + 指标图表组件
 
 **核心函数**：
@@ -483,27 +990,46 @@ $$RSI = 100 - \frac{100}{1 + RS}$$
 
 ---
 
-### `visual/report.py` — 完整报告
+### `visual/report.py` — 完整报告（自研轻量渲染器）
 
 **实现思路**：
 
 1. `generate_report()` 是总入口，接收 K线数据、交易记录、权益数据
 2. 从 OHLC 数据计算技术指标：`_calc_ma()`（4条均线）、`_calc_macd()`（DIF/DEA/柱）、`_calc_kdj()`（K/D/J）、`_calc_rsi()`（RSI）
-3. 依次生成 5 个图表：K线图（含均线+买卖点）+ 4个指标图（成交量/MACD/KDJ/RSI）+ 权益曲线图
-4. `_extract_chart_parts()` 用正则从 pyecharts 的 `render_embed()` 输出中提取 div、script 和 chart 变量名
-5. `_build_page()` 拼装完整 HTML，包含：
-   - **标签页 UI**（CSS 控制显示/隐藏）在 K线图下方切换成交量/MACD/KDJ/RSI
-   - **ECharts 联动**：通过 `chart.group = 'quant_group'` + `echarts.connect('quant_group')` 让所有图表的 dataZoom 同步
-   - 标签切换时对目标图表调用 `chart.resize()` 修复隐藏后的渲染问题
+3. **不再使用 pyecharts**：所有图表数据序列化为紧凑 JSON，嵌入页面一次；JS 图表工厂模板（`_CHART_JS`）从共享数据创建 ECharts 实例
+4. 日K/周K/月K 各 5 张图（K线 + 成交量/MACD/KDJ/RSI），再加权益曲线/Underwater 回撤、60 日 rolling Sharpe、月度收益热力图、交易 PnL 分布，共 19 张图，数据共享不发生重复
+5. 报告体积从原来 pyecharts 方案的 3.2 MB 降低到 ~230 KB（**93% 缩减**）
+6. `_build_page()` 拼装完整 HTML，包含：
+   - **周期标签栏**（日K | 周K | 月K）
+   - **指标标签页**（成交量/MACD/KDJ/RSI 切换，作用域在当期周期 section 内）
+   - **ECharts 联动**：所有图表通过 `echarts.connect('qg')` 同步 dataZoom
+   - 标签切换时 80ms 延迟 resize 目标区域内的图表
 
 **报告包含的图表板块**：
-1. K线图（含 MA5/MA10/MA20/MA60 + 买卖点标记）
+1. K线图（含 MA5/MA10/MA20/MA60 + 买卖点标记），高度 500px
 2. 联动指标区（标签页切换，与 K线图缩放同步）：
-   - 成交量（红涨绿跌柱状图）
-   - MACD（DIF/DEA + 柱状图）
-   - KDJ（K/D/J 三线，0-100）
-   - RSI（RSI线 + 30/70 参考线）
-3. 权益曲线 + 回撤
+   - 成交量（红涨绿跌柱状图），300px
+   - MACD（DIF/DEA + 柱状图），350px
+   - KDJ（K/D/J 三线，自动缩放），350px
+   - RSI（RSI线 + 30/70 参考线），300px
+3. 权益曲线 + Underwater 回撤，520px
+4. 60 日 rolling Sharpe，350px
+5. 月度收益热力图，350px
+6. 交易 PnL 分布，350px
+
+---
+
+### `analysis/` — 全市场统计分析模块
+
+基于批量回测汇总数据（`_summary_*.csv`）生成亮色主题 HTML 分析报告。模块结构：
+
+| 文件 | 职责 |
+|------|------|
+| `analyzer.py` | 数据加载（`load_summary()`、`load_all_summaries()`）、分布统计（`compute_stats()`）、直方图分箱（`build_return_histogram()`）、雷达图归一化（`normalize_for_radar()`）、策略相关性矩阵（`compute_correlation_matrix()`） |
+| `charts.py` | 亮色主题 pyecharts 图表组件：收益率/夏普/交易次数/Profit Factor/回撤持续时间/平均交易 PnL 直方图、风险收益散点图、Monte Carlo 路径、雷达图、箱线图、柱状图、相关性图、策略叠加散点图 |
+| `report.py` | HTML 报告组装：`build_analyze_page()`（单策略画像）、`build_compare_page()`（多策略对比）。生成响应式卡片布局 + 图表嵌入页面 |
+
+**亮色主题常量**（独立于 `visual/kline_chart.py` 的暗色主题）：`_BG_COLOR = "white"`、`_TITLE_COLOR = "#1a1a2e"`、`_UP_COLOR = "#ef5350"`（红涨）、`_DOWN_COLOR = "#26a69a"`（绿跌）。
 
 ---
 
@@ -529,6 +1055,13 @@ output:
   trades_dir: "output/trades"     # 交易流水输出目录
   reports_dir: "output/reports"   # 报告输出目录
   signals_dir: "output/signals"   # 买点扫描汇总输出目录
+  statistics_dir: "output/statistics" # 策略画像和对比报告目录
+  decisions_dir: "output/decisions"   # 决策记忆复盘表目录
+  experiments_dir: "output/experiments" # 实验归档目录，供 dashboard 展示最近实验入口
+
+decision_memory:
+  enabled: true                    # 导出买点时同步写入 decision memory
+  horizons: [5, 10, 20]            # 默认复盘窗口，单位为实际交易日
 
 defaults:
   start_date: "20210101"          # 默认起始日期

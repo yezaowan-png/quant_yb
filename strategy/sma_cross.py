@@ -8,6 +8,12 @@ from strategy.base import BaseStrategy
 class SmaCrossStrategy(BaseStrategy):
     """快速均线上穿慢速均线买入，下穿卖出"""
 
+    PARAM_ALIASES = {"fast": "fast_period", "slow": "slow_period"}
+    PARAM_DEFINITIONS = {
+        "fast_period": {"type": int, "default": 5, "help": "快线周期"},
+        "slow_period": {"type": int, "default": 20, "help": "慢线周期"},
+    }
+
     params = (
         ("fast_period", 5),
         ("slow_period", 20),

@@ -1,0 +1,14 @@
+id: sma_cross_baseline
+strategy: sma_cross
+symbols:
+  - 000001.SZ
+start: "20210101"
+end: "20231231"
+benchmark: 000300.SH
+params:
+  fast: 5
+  slow: 20
+cost:
+  commission: 0.00025
+  stamp_duty: 0.001
+  slippage_perc: 0.001
