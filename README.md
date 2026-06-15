@@ -8,7 +8,7 @@
 
 它包含八个功能：
 1. **下载数据** — 从网络获取 A 股的历史K线数据，存到本地（默认全市场非ST股票）
-2. **策略回测** — 用历史数据模拟你的策略，算出收益率、胜率等指标（内置7种策略）
+2. **策略回测** — 用历史数据模拟你的策略，算出收益率、胜率等指标（内置8种策略）
 3. **策略对比** — 一次运行所有策略，横向对比找出最优
 4. **扫描买点** — 检测最近N日内存在买入信号的股票，汇总导出
 5. **生成报告** — 把回测结果画成 K线图（日K/周K/月K可切换，含均线、成交量、MACD、KDJ、RSI）+ 权益曲线，存为 HTML 文件
@@ -121,7 +121,7 @@ quant> run --file pipeline.txt
 quant> compare --symbol 000001.SZ
 ```
 
-这会对指定股票依次运行所有7种策略，输出横向对比表格，帮你快速找到最适合这只股票的策略。
+这会对指定股票依次运行所有内置策略，输出横向对比表格，帮你快速找到最适合这只股票的策略。
 
 ### 策略对比
 
@@ -304,7 +304,7 @@ output/decisions/decision_memory.csv
 
 ## 可用策略一览
 
-系统内置 7 种策略，可通过 `compare --symbol <代码>` 一键对比：
+系统内置 8 种策略，可通过 `compare --symbol <代码>` 一键对比：
 
 | 策略 | 命令名 | 核心参数 | 适合场景 |
 |------|--------|----------|----------|
@@ -315,6 +315,7 @@ output/decisions/decision_memory.csv
 | RSI超买超卖 | `rsi` | `--period 14 --oversold 30 --overbought 70` | 震荡市 |
 | 单均线 | `single_ma` | `--period 20` | 简单趋势 |
 | 放量平台突破 | `volume_platform_breakout` | `--lookback 30 --volume-multiplier 1.5` | 平台整理后的趋势突破 |
+| 多周期放量趋势 | `multi_timeframe_volume_trend` | `--lookback 20 --vol-mult 1.5 --weekly 20` | 周线趋势过滤 + 日线放量突破 |
 
 ## 策略详解
 
@@ -444,6 +445,23 @@ python main.py backtest scan --strategy volume_platform_breakout --days 10 --max
 - 长期阴跌或均线空头排列的股票
 - 无量突破、尾盘拉升但成交量没有确认的股票
 - 震荡很宽的平台，因为平台上沿/下沿不稳定，突破容易失真
+
+### 多周期放量趋势策略 (multi_timeframe_volume_trend)
+
+**核心思想**：先用周线判断大级别趋势，再用日线放量突破寻找入场点。它适合试验“周线定方向、日线找买点”的多周期框架。
+
+运行示例：
+
+```bash
+python main.py backtest run --strategy multi_timeframe_volume_trend --symbol 000001.SZ
+```
+
+**关键边界**：
+
+- 周线由日线数据通过 Backtrader `resampledata()` 生成，策略读取已经形成的周线 bar。
+- 下单仍然只发生在日线 data0 上，周线 data1 只做趋势过滤。
+- 日线突破基准使用今天之前的历史高点窗口，不把当天高点反向纳入突破基准。
+- 这是多周期试点策略，可继续扩展到三重筛选、量价趋势或行业过滤，但不会改变现有单周期策略的运行方式。
 
 ## 回测结果怎么看？
 
@@ -624,6 +642,11 @@ quant_yb/
 | `lose_trades` | 亏损交易次数 |
 | `win_rate_pct` | 胜率（%） |
 | `sharpe_ratio` | 夏普比率（越高越好，> 1 算优秀） |
+| `sortino_ratio` | Sortino 比率，只惩罚下行波动 |
+| `calmar_ratio` | Calmar 比率，年化收益相对最大回撤 |
+| `profit_factor` | 盈利交易总额 / 亏损交易总额绝对值 |
+| `avg_trade_pnl` | 平均平仓盈亏 |
+| `longest_win_streak` / `longest_loss_streak` | 最长连续盈利/亏损次数 |
 | `max_drawdown_pct` | 最大回撤（%） |
 | `max_drawdown_days` | 最大回撤持续天数 |
 

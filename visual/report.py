@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 
 # ---- echarts CDN ----
-_ECHARTS_SRC = "https://assets.pyecharts.org/assets/v6/echarts.min.js"
+_ECHARTS_SRC = "https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"
 
 # ---- 策略中文名 ----
 _STRAT_NAMES = {"sma_cross": "双均线交叉", "macd_cross": "MACD 金叉", "kdj": "KDJ",

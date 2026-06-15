@@ -7,6 +7,7 @@ import pandas as pd
 
 from decision.evaluator import evaluate_memory
 from decision.recorder import append_buy_signals, load_memory
+from engine.runner import BacktestRunner, load_strategy_class
 from experiment.runner import run_experiment
 from visual.dashboard import generate_dashboard
 
@@ -250,6 +251,48 @@ cost:
             ]:
                 with self.subTest(summary_column=col):
                     self.assertIn(col, summary.columns)
+
+    def test_multi_timeframe_strategy_runs_with_weekly_resample(self):
+        dates = pd.date_range("2025-01-01", periods=160, freq="B")
+        closes = [10 + i * 0.04 + (i % 17) * 0.05 for i in range(len(dates))]
+        df = pd.DataFrame(
+            {
+                "date": dates,
+                "open": [v - 0.03 for v in closes],
+                "high": [v + 0.15 for v in closes],
+                "low": [v - 0.15 for v in closes],
+                "close": closes,
+                "volume": [100000 + (i % 13) * 15000 for i in range(len(dates))],
+            }
+        )
+        config = {
+            "backtest": {
+                "initial_cash": 100000.0,
+                "commission": 0.00025,
+                "stamp_duty": 0.001,
+                "min_commission": 5.0,
+                "slippage_perc": 0.001,
+                "enforce_price_limits": True,
+                "limit_pct": 0.10,
+                "volume_limit_ratio": 0.0,
+                "volume_unit": 100,
+            },
+            "benchmark": {"enabled": False},
+            "parallel": {"backtest_workers": 1},
+            "output": {"trades_dir": "unused"},
+        }
+
+        strategy_cls = load_strategy_class("multi_timeframe_volume_trend")
+        self.assertTrue(getattr(strategy_cls, "REQUIRES_WEEKLY", False))
+        result = BacktestRunner(config).run(
+            df,
+            strategy_cls,
+            {"symbol": "000001.SZ", "volume_multiplier": 1.0},
+            verbose=False,
+        )
+        self.assertIn("stats", result)
+        self.assertEqual(result["stats"]["start_date"], "2025-01-01")
+        self.assertIn("sortino_ratio", result["stats"])
 
 
 if __name__ == "__main__":

@@ -366,6 +366,8 @@ def cli(ctx):
 
 8. **动态加载策略**：`load_strategy_class()` 使用 `importlib.import_module()` 动态加载策略模块。命名约定：文件名 `sma_cross` → 类名 `SmaCrossStrategy`。
 
+9. **多周期 feed 试点**：策略类若声明 `REQUIRES_WEEKLY = True`，`BacktestRunner.run()` 会在日线 data0 之外，通过 `cerebro.resampledata()` 从同一份日线 DataFrame 生成周线 data1。默认策略不声明该属性，因此原有单周期策略仍只接收一个日线 feed。
+
 **回撤计算逻辑**：
 ```python
 def compute_drawdowns(equity):
@@ -430,6 +432,8 @@ def next(self):
 - 卖出时清仓（size=pos），避免分批卖出复杂度
 
 **买点追踪**：`buy_signal_dates` 列表记录所有出现买入信号的日期（无论是否实际成交），用于后续的买点扫描功能。这比只查交易记录更准确，因为当已有持仓时买入信号不会产生新的交易。
+
+**多周期下单边界**：`BaseStrategy` 默认只对 `trade_data_index=0` 的 feed 下单。多周期策略可以读取周线、月线等辅助 feed，但买卖委托仍落在日线 data0 上，避免在 resample 后的周线 bar 上误成交。
 
 **交易记录**：通过覆写 `notify_order()` 和 `notify_trade()` 两个回调：
 - `notify_order`：订单成交时记录买卖信息（日期、方向、价格、数量）
@@ -773,6 +777,40 @@ max(lookback, volume_period, 20 + ma_slope_days)
 | 平台跌破后卖出太慢 | 降低 `platform_sell_tolerance` |
 | 固定止损太宽 | 降低 `stop_loss_pct` |
 | 固定止损太容易触发 | 提高 `stop_loss_pct` |
+
+---
+
+### 8. 多周期放量趋势策略 (multi_timeframe_volume_trend) — `strategy/multi_timeframe_volume_trend.py`
+
+#### 核心思想
+
+该策略是多周期 Backtrader feed 的第一版试点：
+
+- 日线 data0 负责成交、突破、均线和均量判断。
+- 周线 data1 由 `BacktestRunner.run()` 使用 `cerebro.resampledata()` 从日线生成。
+- 周线只做趋势过滤，不直接下单。
+
+#### 买入规则
+
+1. 周线历史长度大于 `weekly_ma`。
+2. 周线收盘价高于周线均线，且当前周线收盘价不低于上一根周线收盘价。
+3. 日线历史长度大于 `max(slow_ma, breakout_lookback, volume_period)`。
+4. 当前日线收盘价突破今天之前 `breakout_lookback` 个交易日最高价。
+5. 日线快均线高于慢均线，当前收盘价高于快均线。
+6. 当前成交量大于日线均量的 `volume_multiplier` 倍。
+
+#### 卖出规则
+
+- 日线收盘价跌破慢均线。
+- 或周线收盘价跌破周线均线。
+- 或相对实际买入成交价跌幅达到 `stop_loss_pct`。
+
+#### 未来函数边界
+
+- 日线突破基准使用 `data.high[-1]` 到历史窗口，不包含当前 bar 的高点。
+- 周线 feed 由 Backtrader resample 生成，策略只能读取当前已形成的周线 bar 及历史周线 bar。
+- `BaseStrategy` 默认只对 `trade_data_index=0` 下单，因此周线 data1 不会触发买卖委托。
+- 该策略仍复用 A 股手续费、滑点、涨跌停、成交量限制、T+1 和交易流水导出逻辑。
 
 ---
 

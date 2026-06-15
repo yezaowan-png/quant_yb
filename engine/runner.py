@@ -92,6 +92,10 @@ def load_strategy_class(strategy_name: str):
     return cls
 
 
+def _requires_weekly_feed(strategy_cls) -> bool:
+    return bool(getattr(strategy_cls, "REQUIRES_WEEKLY", False))
+
+
 # ============================================================
 #  模块级 worker 函数 —— 供 ProcessPoolExecutor 使用
 # ============================================================
@@ -235,7 +239,24 @@ class BacktestRunner:
             volume="volume",
             openinterest=-1,
         )
-        cerebro.adddata(data_feed)
+        cerebro.adddata(data_feed, name="daily")
+        if _requires_weekly_feed(strategy_cls):
+            weekly_feed = bt.feeds.PandasData(
+                dataname=df.set_index("date"),
+                datetime=None,
+                open="open",
+                high="high",
+                low="low",
+                close="close",
+                volume="volume",
+                openinterest=-1,
+            )
+            cerebro.resampledata(
+                weekly_feed,
+                timeframe=bt.TimeFrame.Weeks,
+                compression=1,
+                name="weekly",
+            )
 
         cerebro.broker.setcash(self.cash)
 

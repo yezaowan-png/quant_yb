@@ -31,6 +31,8 @@ from analysis.charts import (
     render_charts,
 )
 
+_ECHARTS_SRC = "https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"
+
 # ---- 亮色主题 CSS ----
 _CSS = """* { margin: 0; padding: 0; box-sizing: border-box; }
 body {
@@ -283,7 +285,7 @@ def build_analyze_page(
         create_monte_carlo_paths(df, strategy_name),
     ]
     rendered = render_charts(chart_objects)
-    echarts_src = rendered[0]["echarts_src"] if rendered else "https://assets.pyecharts.org/assets/v6/echarts.min.js"
+    echarts_src = _ECHARTS_SRC
 
     # 统计卡片
     cards = [
@@ -486,7 +488,7 @@ def build_compare_page(
         create_bubble_chart(data_map),
     ]
     rendered = render_charts(chart_objects)
-    echarts_src = rendered[0]["echarts_src"] if rendered else "https://assets.pyecharts.org/assets/v6/echarts.min.js"
+    echarts_src = _ECHARTS_SRC
 
     all_vars = [c["var"] for c in rendered if c["var"]]
     vars_json = "[" + ", ".join(all_vars) + "]"

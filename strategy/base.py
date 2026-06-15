@@ -107,6 +107,7 @@ class BaseStrategy(bt.Strategy):
         ("limit_pct", 0.10),
         ("volume_limit_ratio", 0.0),
         ("volume_unit", 100),
+        ("trade_data_index", 0),
     )
 
     def __init__(self):
@@ -163,8 +164,18 @@ class BaseStrategy(bt.Strategy):
 
     # ---- backtrader 核心回调 ----
 
+    def _trade_datas(self):
+        """Return data feeds that may submit orders. Multi-timeframe strategies trade data0."""
+        try:
+            idx = int(self.p.trade_data_index)
+        except (TypeError, ValueError):
+            idx = 0
+        if 0 <= idx < len(self.datas):
+            return [self.datas[idx]]
+        return list(self.datas)
+
     def next(self):
-        for data in self.datas:
+        for data in self._trade_datas():
             pos = self.getposition(data).size
             today = data.datetime.date(0)
 
