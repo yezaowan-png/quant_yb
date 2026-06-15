@@ -69,7 +69,12 @@ def analyze_strategy(strategy: str):
     click.echo(f"  中位收益:   {stats['median_return']:+.1f}%")
     click.echo(f"  正收益比例: {stats['positive_ratio']:.1f}% ({stats['positive_count']}/{stats['count']})")
     click.echo(f"  平均夏普:   {stats['avg_sharpe']:.3f}")
+    click.echo(f"  Sortino:    {stats['avg_sortino']:.3f}")
+    click.echo(f"  Calmar:     {stats['avg_calmar']:.3f}")
+    click.echo(f"  ProfitFact: {stats['avg_profit_factor']:.2f}")
     click.echo(f"  平均回撤:   {stats['avg_max_dd']:.1f}%")
+    click.echo(f"  回撤天数:   {stats['avg_max_drawdown_days']:.1f}")
+    click.echo(f"  连赢/连亏:  {stats['max_win_streak']}/{stats['max_loss_streak']}")
     click.echo(f"  平均胜率:   {stats['avg_win_rate']:.1f}%")
     click.echo(f"  平均交易:   {stats['avg_trades']} 次")
     click.echo(f"  收益范围:   [{stats['min_return']:+.1f}% , {stats['max_return']:+.1f}%]")
@@ -105,7 +110,8 @@ def compare_strategies():
                    f"交易股 {s['avg_active_return']:>+7.2f}%  "
                    f"超额 {s['avg_excess_return']:>+7.1f}%  "
                    f"正向率 {s['positive_ratio']:>5.1f}%  "
-                   f"夏普 {s['avg_sharpe']:>+7.3f}")
+                   f"夏普 {s['avg_sharpe']:>+7.3f}  "
+                   f"Sortino {s['avg_sortino']:>+7.3f}")
 
     output_path = stats_dir / "comparison.html"
     click.echo(f"\n  生成对比报告...")

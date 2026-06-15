@@ -164,9 +164,50 @@ def _clean_list(lst, decimals=None):
 
 def _compute_drawdowns(values: list[float]) -> list[float]:
     arr = np.array(values)
+    if len(arr) == 0:
+        return []
     peak = np.maximum.accumulate(arr)
     dd = (arr - peak) / peak * 100
     return [round(v, 2) for v in dd.tolist()]
+
+
+def _longest_streak(values: list[float], positive: bool) -> int:
+    longest = 0
+    current = 0
+    for value in values:
+        matched = value > 0 if positive else value < 0
+        if matched:
+            current += 1
+            longest = max(longest, current)
+        else:
+            current = 0
+    return longest
+
+
+def _compute_rolling_sharpe(values: list[float], window: int = 60) -> list:
+    returns = pd.Series(values, dtype="float64").pct_change()
+    roll_mean = returns.rolling(window=window).mean()
+    roll_std = returns.rolling(window=window).std()
+    sharpe = roll_mean / (roll_std + 1e-12) * np.sqrt(252)
+    return [round(float(v), 3) if not pd.isna(v) else None for v in sharpe.tolist()]
+
+
+def _compute_monthly_returns(equity_data: pd.DataFrame) -> dict:
+    frame = equity_data.copy()
+    frame["dates"] = pd.to_datetime(frame["dates"])
+    monthly = frame.set_index("dates")["equity"].resample("M").last().pct_change().dropna() * 100
+    if monthly.empty:
+        return {"years": [], "months": [], "data": []}
+    years = [str(y) for y in sorted(monthly.index.year.unique())]
+    year_index = {year: i for i, year in enumerate(years)}
+    data = []
+    for dt, value in monthly.items():
+        data.append([int(dt.month) - 1, year_index[str(dt.year)], round(float(value), 2)])
+    return {
+        "years": years,
+        "months": [f"{i}月" for i in range(1, 13)],
+        "data": data,
+    }
 
 
 # ============================================================
@@ -180,12 +221,21 @@ def _compute_stats(df_trades, equity_data) -> dict:
         buys = df_trades[df_trades["direction"] == "BUY"]
         total_trades = len(buys)
         if total_trades > 0:
+            sell_pnls = [float(v or 0) for v in sells["pnl"].tolist()]
             win_trades = int((sells["pnl"] > 0).sum())
+            gross_profit = sum(v for v in sell_pnls if v > 0)
+            gross_loss = sum(v for v in sell_pnls if v < 0)
             stats["total_trades"] = total_trades
             stats["win_trades"] = win_trades
             stats["lose_trades"] = total_trades - win_trades
             stats["win_rate"] = round(win_trades / total_trades * 100, 2)
             stats["total_pnl"] = round(sells["pnl"].sum(), 2)
+            if gross_loss < 0:
+                stats["profit_factor"] = round(gross_profit / abs(gross_loss), 3)
+            elif gross_profit > 0:
+                stats["profit_factor"] = "N/A"
+            stats["longest_win_streak"] = _longest_streak(sell_pnls, positive=True)
+            stats["longest_loss_streak"] = _longest_streak(sell_pnls, positive=False)
 
     if equity_data is not None and not equity_data.empty:
         eq = equity_data["equity"].tolist()
@@ -197,6 +247,10 @@ def _compute_stats(df_trades, equity_data) -> dict:
                     (stats["final_value"] - stats["initial_value"]) / stats["initial_value"] * 100, 2)
             dd = _compute_drawdowns(eq)
             stats["max_drawdown"] = round(min(dd), 2) if dd else 0
+            returns = pd.Series(eq, dtype="float64").pct_change().dropna()
+            downside = returns[returns < 0]
+            if len(downside) > 1 and downside.std() > 0:
+                stats["sortino"] = round(float(returns.mean() / downside.std() * np.sqrt(252)), 3)
 
     return stats
 
@@ -217,6 +271,12 @@ def _build_stats_html(stats: dict) -> str:
         cards.append(_card("交易次数", str(stats["total_trades"])))
     if "win_rate" in stats:
         cards.append(_card("胜率", f"{stats['win_rate']}%"))
+    if "sortino" in stats:
+        cards.append(_card("Sortino", f"{stats['sortino']}", "up" if stats["sortino"] >= 0 else "down"))
+    if "profit_factor" in stats:
+        cards.append(_card("Profit Factor", f"{stats['profit_factor']}"))
+    if "longest_win_streak" in stats:
+        cards.append(_card("最长连赢/连亏", f"{stats['longest_win_streak']}/{stats.get('longest_loss_streak', 0)}"))
     if "final_value" in stats:
         cards.append(_card("最终权益", f"&yen;{stats['final_value']:,.2f}"))
     if "total_pnl" in stats:
@@ -294,8 +354,25 @@ function rsi(dom,d){
 function equity(dom,d){
   if(!d)return null;
   var vs=Math.max(70,100-Math.max(30,100*90/Math.max(d.dates.length,1)));
-  var eq=ch(dom,{backgroundColor:C.bg,title:ti('权益曲线 & 回撤'),xAxis:ax(d.dates),yAxis:[ya({name:'权益 (元)'}),{type:'value',name:'回撤 %',axisLabel:{fontSize:10,color:C.lb,formatter:'{value}%'},splitLine:{show:false},nameTextStyle:{color:C.lb}}],legend:lg(['权益曲线','回撤']),tooltip:tl(),dataZoom:dz(vs),toolbox:tb(),series:[{name:'权益曲线',type:'line',data:d.equity,yAxisIndex:0,smooth:true,symbol:'none',lineStyle:{color:C.bl,width:2.5},areaStyle:{opacity:0.08,color:C.bl}},{name:'回撤',type:'line',data:d.drawdowns,yAxisIndex:1,smooth:true,symbol:'none',lineStyle:{color:C.up,width:1.5},areaStyle:{opacity:0.1,color:C.up}}]});
+  var eq=ch(dom,{backgroundColor:C.bg,title:ti('权益曲线 & Underwater 回撤'),xAxis:ax(d.dates),yAxis:[ya({name:'权益 (元)'}),{type:'value',name:'回撤 %',axisLabel:{fontSize:10,color:C.lb,formatter:'{value}%'},splitLine:{show:false},nameTextStyle:{color:C.lb}}],legend:lg(['权益曲线','回撤']),tooltip:tl(),dataZoom:dz(vs),toolbox:tb(),series:[{name:'权益曲线',type:'line',data:d.equity,yAxisIndex:0,smooth:true,symbol:'none',lineStyle:{color:C.bl,width:2.5},areaStyle:{opacity:0.08,color:C.bl}},{name:'回撤',type:'line',data:d.drawdowns,yAxisIndex:1,smooth:true,symbol:'none',lineStyle:{color:C.up,width:1.5},areaStyle:{opacity:0.1,color:C.up}}]});
   return eq;
+}
+
+function rollingSharpe(dom,d){
+  if(!d||!d.rollingSharpe)return null;
+  var vs=Math.max(70,100-Math.max(30,100*90/Math.max(d.dates.length,1)));
+  return ch(dom,{backgroundColor:C.bg,title:ti('Rolling Sharpe (60日)'),xAxis:ax(d.dates),yAxis:ya({name:'Sharpe'}),legend:lg(['Rolling Sharpe']),tooltip:tl(),dataZoom:dz(vs),toolbox:tb(),series:[{name:'Rolling Sharpe',type:'line',data:d.rollingSharpe,smooth:true,symbol:'none',connectNulls:true,lineStyle:{color:C.bl,width:2.2},areaStyle:{opacity:0.08,color:C.bl}}]});
+}
+
+function monthlyHeatmap(dom,d){
+  if(!d||!d.monthly||!d.monthly.data||!d.monthly.data.length)return null;
+  return ch(dom,{backgroundColor:C.bg,title:ti('月度收益热力图'),tooltip:{position:'top',formatter:function(p){return d.monthly.years[p.value[1]]+' '+d.monthly.months[p.value[0]]+': '+p.value[2]+'%';}},grid:{height:'62%',top:'18%'},xAxis:{type:'category',data:d.monthly.months,splitArea:{show:true},axisLabel:{color:C.lb}},yAxis:{type:'category',data:d.monthly.years,splitArea:{show:true},axisLabel:{color:C.lb}},visualMap:{min:-20,max:20,calculable:true,orient:'horizontal',left:'center',bottom:'5%',inRange:{color:[C.dn,'#f7f7f7',C.up]}},series:[{name:'月度收益',type:'heatmap',data:d.monthly.data,label:{show:true,formatter:function(p){return p.value[2]+'%';},fontSize:10},emphasis:{itemStyle:{shadowBlur:8,shadowColor:'rgba(0,0,0,.18)'}}}]});
+}
+
+function tradePnl(dom,d){
+  if(!d||!d.pnl||!d.pnl.length)return null;
+  var colors=d.pnl.map(function(v){return v>=0?C.up:C.dn;});
+  return ch(dom,{backgroundColor:C.bg,title:ti('交易 PnL 分布'),xAxis:ax(d.labels,false),yAxis:ya({name:'PnL'}),legend:lg([]),tooltip:tl(),dataZoom:dz(60),toolbox:tb(),series:[{name:'PnL',type:'bar',data:d.pnl,itemStyle:{color:function(p){return colors[p.dataIndex];}},label:{show:false}}]});
 }
 
 // ---- Bootstrap ----
@@ -307,6 +384,8 @@ function initAll(){
     });
   }
   if(window._E){equity('equity',window._E);}
+  if(window._E){rollingSharpe('rolling-sharpe',window._E);monthlyHeatmap('monthly-heatmap',window._E);}
+  if(window._T){tradePnl('trade-pnl',window._T);}
   ALL.forEach(function(c){c.group='qg';});
   echarts.connect('qg');
   window._ALL=ALL;
@@ -454,7 +533,8 @@ body {
 
 
 def _build_page(symbol: str, strategy_name: str, stats: dict,
-                period_data_json: str, equity_data_json: str) -> str:
+                period_data_json: str, equity_data_json: str,
+                trade_data_json: str) -> str:
     """组装完整 HTML 页面。period_data_json 和 equity_data_json 是预序列化的 JSON 字符串。"""
     stats_html = _build_stats_html(stats)
     display_name = _STRAT_NAMES.get(strategy_name, strategy_name)
@@ -488,7 +568,13 @@ def _build_page(symbol: str, strategy_name: str, stats: dict,
 
     equity_section = ""
     if equity_data_json and equity_data_json != "null":
-        equity_section = '<div class="chart-section chart-section--equity"><div id="equity" class="chart-container ht-520"></div></div>'
+        equity_section = """<div class="chart-section chart-section--equity"><div id="equity" class="chart-container ht-520"></div></div>
+    <div class="chart-section chart-section--equity"><div id="rolling-sharpe" class="chart-container ht-350"></div></div>
+    <div class="chart-section chart-section--equity"><div id="monthly-heatmap" class="chart-container ht-350"></div></div>"""
+
+    trade_section = ""
+    if trade_data_json and trade_data_json != "null":
+        trade_section = '<div class="chart-section chart-section--equity"><div id="trade-pnl" class="chart-container ht-350"></div></div>'
 
     return f"""<!DOCTYPE html>
 <html lang="zh-CN">
@@ -512,9 +598,10 @@ def _build_page(symbol: str, strategy_name: str, stats: dict,
     <div class="period-tabs">{period_tab_btns}</div>
     {"".join(period_sections)}
     {equity_section}
+    {trade_section}
     <div class="footer">QuantYB &copy; 2026 &nbsp;&middot;&nbsp; A-Share Quantitative Backtesting System</div>
 </div>
-<script>window._D={period_data_json};window._E={equity_data_json};</script>
+<script>window._D={period_data_json};window._E={equity_data_json};window._T={trade_data_json};</script>
 {_CHART_JS}
 </body>
 </html>"""
@@ -554,7 +641,21 @@ def generate_report(
         eq_list = [round(float(v), 2) for v in equity_data["equity"].tolist()]
         dd_list = _compute_drawdowns(eq_list)
         dates_eq = equity_data["dates"].astype(str).tolist()
-        equity_json = _to_json({"dates": dates_eq, "equity": eq_list, "drawdowns": dd_list})
+        equity_json = _to_json({
+            "dates": dates_eq,
+            "equity": eq_list,
+            "drawdowns": dd_list,
+            "rollingSharpe": _compute_rolling_sharpe(eq_list, 60),
+            "monthly": _compute_monthly_returns(equity_data),
+        })
+
+    trade_json = "null"
+    if df_trades is not None and not df_trades.empty:
+        sells = df_trades[df_trades["direction"] == "SELL"].copy()
+        if not sells.empty and "pnl" in sells.columns:
+            labels = sells["date"].astype(str).tolist()
+            pnl = [round(float(v or 0), 2) for v in sells["pnl"].tolist()]
+            trade_json = _to_json({"labels": labels, "pnl": pnl})
 
     # ---- 统计 ----
     stats = _compute_stats(df_trades, equity_data)
@@ -616,7 +717,7 @@ def generate_report(
     period_json = _to_json(period_data)
 
     # ---- 组装 HTML ----
-    html = _build_page(symbol, strategy_name, stats, period_json, equity_json)
+    html = _build_page(symbol, strategy_name, stats, period_json, equity_json, trade_json)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(html, encoding="utf-8")

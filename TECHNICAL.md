@@ -807,6 +807,13 @@ max(lookback, volume_period, 20 + ma_slope_days)
 | `annual_return_pct` | 单股年化收益率 | `(final_value / initial_cash) ** (252 / trading_days) - 1`，再乘以 100 |
 | `annual_volatility_pct` | 单股年化波动率 | `equity.pct_change().std() * sqrt(252) * 100` |
 | `calmar_ratio` | 单股 Calmar 比率 | `annual_return_pct / max_drawdown_pct` |
+| `sortino_ratio` | 单股 Sortino 比率 | 日权益收益均值 / 下行收益标准差 × `sqrt(252)`；下行波动不足时为 0 |
+| `profit_factor` | Profit Factor | 平仓盈利总额 / 平仓亏损绝对值；无亏损且有盈利时留空，避免写入无限值 |
+| `gross_profit` / `gross_loss` | 平仓盈利/亏损总额 | 来自策略交易流水中 SELL 记录的 `pnl` |
+| `avg_trade_pnl` | 平均平仓盈亏 | SELL 记录 `pnl` 的均值 |
+| `best_trade_pnl` / `worst_trade_pnl` | 单笔最佳/最差平仓盈亏 | SELL 记录 `pnl` 的最大/最小值 |
+| `longest_win_streak` / `longest_loss_streak` | 最长连续盈利/亏损次数 | 按 SELL 记录 `pnl` 顺序统计 |
+| `avg_exposure_pct` | 平均持仓暴露 | `EquityCurveAnalyzer` 逐 bar 记录的持仓市值 / 权益 |
 | `total_trades` | 单股完整交易次数 | Backtrader `TradeAnalyzer` 的盈利交易数 + 亏损交易数 |
 | `win_trades` | 盈利交易次数 | Backtrader `TradeAnalyzer` |
 | `lose_trades` | 亏损交易次数 | Backtrader `TradeAnalyzer` |
@@ -836,7 +843,13 @@ max(lookback, volume_period, 20 + ma_slope_days)
 | 中位数收益率 | `median_return` | `median(total_return_pct)` |
 | 正收益比例 | `positive_ratio` | `count(total_return_pct > 0) / count * 100` |
 | 平均夏普 | `avg_sharpe` | `mean(sharpe_ratio)` |
+| 平均 Sortino | `avg_sortino` | `mean(sortino_ratio)`；旧 summary 没有该列时默认为 0 |
+| 平均 Calmar | `avg_calmar` | `mean(calmar_ratio)` |
+| 平均 Profit Factor | `avg_profit_factor` | `mean(profit_factor)`，自动忽略空值和无限值 |
 | 平均最大回撤 | `avg_max_dd` | `mean(max_drawdown_pct)` |
+| 回撤持续天数 | `avg_max_drawdown_days` | `mean(max_drawdown_days)` |
+| 最长连赢/连亏 | `max_win_streak` / `max_loss_streak` | 全市场样本中 `longest_win_streak` / `longest_loss_streak` 的最大值 |
+| 平均交易 PnL | `avg_trade_pnl` | `mean(avg_trade_pnl)` |
 | 平均胜率 | `avg_win_rate` | `mean(win_rate_pct)` |
 | 平均交易次数 | `avg_trades` | `mean(total_trades)` |
 
@@ -848,6 +861,8 @@ max(lookback, volume_period, 20 + ma_slope_days)
 4. `positive_ratio` 统计的是全部股票中的正收益比例，不只统计有交易股票。
 5. `avg_win_rate` 是“先算每只股票自己的胜率，再取平均”，不是把所有交易混在一起算总体胜率。
 6. `avg_excess_return` 和 `avg_information_ratio` 依赖基准指数缓存。若 `data/cache/{benchmark.symbol}.csv` 不存在，相关字段不会出现在 summary 中，统计报告会显示 0。
+7. Sortino、Profit Factor、连续盈亏等字段是阶段 2 新增字段；旧的 `_summary_*.csv` 没有这些列时，统计页会保持兼容并显示 0 或跳过对应图表。重新执行批量回测后，新 summary 才会完整携带这些字段。
+8. Profit Factor 使用平仓交易流水中的 `pnl`，不改变 Backtrader 成交价格、手续费、滑点、涨跌停、成交量限制或 T+1 规则。
 
 ---
 
@@ -880,8 +895,8 @@ max(lookback, volume_period, 20 + ma_slope_days)
 
 1. `generate_report()` 是总入口，接收 K线数据、交易记录、权益数据
 2. 从 OHLC 数据计算技术指标：`_calc_ma()`（4条均线）、`_calc_macd()`（DIF/DEA/柱）、`_calc_kdj()`（K/D/J）、`_calc_rsi()`（RSI）
-3. **不再使用 pyecharts**：所有图表数据序列化为紧凑 JSON，嵌入页面一次；JS 图表工厂模板（`_CHART_JS`，约 7.5KB）从共享数据创建 16 个 ECharts 实例
-4. 日K/周K/月K 各 5 张图（K线 + 成交量/MACD/KDJ/RSI）+ 1 张权益曲线 = 16 张图，数据共享不发生重复
+3. **不再使用 pyecharts**：所有图表数据序列化为紧凑 JSON，嵌入页面一次；JS 图表工厂模板（`_CHART_JS`）从共享数据创建 ECharts 实例
+4. 日K/周K/月K 各 5 张图（K线 + 成交量/MACD/KDJ/RSI），再加权益曲线/Underwater 回撤、60 日 rolling Sharpe、月度收益热力图、交易 PnL 分布，共 19 张图，数据共享不发生重复
 5. 报告体积从原来 pyecharts 方案的 3.2 MB 降低到 ~230 KB（**93% 缩减**）
 6. `_build_page()` 拼装完整 HTML，包含：
    - **周期标签栏**（日K | 周K | 月K）
@@ -896,7 +911,10 @@ max(lookback, volume_period, 20 + ma_slope_days)
    - MACD（DIF/DEA + 柱状图），350px
    - KDJ（K/D/J 三线，自动缩放），350px
    - RSI（RSI线 + 30/70 参考线），300px
-3. 权益曲线 + 回撤，520px
+3. 权益曲线 + Underwater 回撤，520px
+4. 60 日 rolling Sharpe，350px
+5. 月度收益热力图，350px
+6. 交易 PnL 分布，350px
 
 ---
 
@@ -907,7 +925,7 @@ max(lookback, volume_period, 20 + ma_slope_days)
 | 文件 | 职责 |
 |------|------|
 | `analyzer.py` | 数据加载（`load_summary()`、`load_all_summaries()`）、分布统计（`compute_stats()`）、直方图分箱（`build_return_histogram()`）、雷达图归一化（`normalize_for_radar()`）、策略相关性矩阵（`compute_correlation_matrix()`） |
-| `charts.py` | 亮色主题 pyecharts 图表组件：收益率/夏普/交易次数直方图、风险收益散点图、雷达图、箱线图、柱状图、相关性图、策略叠加散点图 |
+| `charts.py` | 亮色主题 pyecharts 图表组件：收益率/夏普/交易次数/Profit Factor/回撤持续时间/平均交易 PnL 直方图、风险收益散点图、Monte Carlo 路径、雷达图、箱线图、柱状图、相关性图、策略叠加散点图 |
 | `report.py` | HTML 报告组装：`build_analyze_page()`（单策略画像）、`build_compare_page()`（多策略对比）。生成响应式卡片布局 + 图表嵌入页面 |
 
 **亮色主题常量**（独立于 `visual/kline_chart.py` 的暗色主题）：`_BG_COLOR = "white"`、`_TITLE_COLOR = "#1a1a2e"`、`_UP_COLOR = "#ef5350"`（红涨）、`_DOWN_COLOR = "#26a69a"`（绿跌）。

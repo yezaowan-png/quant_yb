@@ -19,6 +19,10 @@ from analysis.charts import (
     create_risk_scatter,
     create_sharpe_histogram,
     create_trade_histogram,
+    create_profit_factor_histogram,
+    create_drawdown_duration_histogram,
+    create_trade_pnl_histogram,
+    create_monte_carlo_paths,
     create_radar_chart,
     create_boxplot_comparison,
     create_bar_comparison,
@@ -273,6 +277,10 @@ def build_analyze_page(
         create_risk_scatter(scatter_data, strategy_name),
         create_sharpe_histogram(df, strategy_name),
         create_trade_histogram(df, strategy_name),
+        create_profit_factor_histogram(df, strategy_name),
+        create_drawdown_duration_histogram(df, strategy_name),
+        create_trade_pnl_histogram(df, strategy_name),
+        create_monte_carlo_paths(df, strategy_name),
     ]
     rendered = render_charts(chart_objects)
     echarts_src = rendered[0]["echarts_src"] if rendered else "https://assets.pyecharts.org/assets/v6/echarts.min.js"
@@ -300,7 +308,15 @@ def build_analyze_page(
                          "up" if stats["positive_ratio"] >= 50 else "down"),
         _build_stat_card("平均夏普", f"{stats['avg_sharpe']:.3f}",
                          "up" if stats["avg_sharpe"] >= 0 else "down"),
+        _build_stat_card("平均 Sortino", f"{stats['avg_sortino']:.3f}",
+                         "up" if stats["avg_sortino"] >= 0 else "down"),
+        _build_stat_card("平均 Calmar", f"{stats['avg_calmar']:.3f}",
+                         "up" if stats["avg_calmar"] >= 0 else "down"),
+        _build_stat_card("平均 Profit Factor", f"{stats['avg_profit_factor']:.2f}",
+                         "up" if stats["avg_profit_factor"] >= 1 else "down"),
         _build_stat_card("平均最大回撤", f"{stats['avg_max_dd']:.1f}%", "down"),
+        _build_stat_card("回撤持续天数", f"{stats['avg_max_drawdown_days']:.1f}", "neutral"),
+        _build_stat_card("最长连赢/连亏", f"{stats['max_win_streak']}/{stats['max_loss_streak']}", "neutral"),
         _build_stat_card("平均胜率", f"{stats['avg_win_rate']:.1f}%",
                          "up" if stats["avg_win_rate"] >= 50 else "down"),
         _build_stat_card("平均交易次数", str(stats["avg_trades"]), "neutral"),
@@ -315,6 +331,13 @@ def build_analyze_page(
         "annual_volatility_pct": "年化波动%",
         "excess_return_pct": "超额收益%",
         "information_ratio": "信息比率",
+        "sortino_ratio": "Sortino",
+        "calmar_ratio": "Calmar",
+        "profit_factor": "Profit Factor",
+        "max_drawdown_days": "回撤天数",
+        "avg_trade_pnl": "平均PnL",
+        "longest_win_streak": "最长连赢",
+        "longest_loss_streak": "最长连亏",
     }
     def _relabel(rows):
         result = []
@@ -334,7 +357,11 @@ def build_analyze_page(
     # 全部股票排名表
     all_cols = ["symbol", "total_return_pct", "sharpe_ratio", "max_drawdown_pct",
                 "win_rate_pct", "total_trades"]
-    for optional_col in ("annual_return_pct", "annual_volatility_pct", "excess_return_pct", "information_ratio"):
+    for optional_col in (
+        "annual_return_pct", "annual_volatility_pct", "sortino_ratio", "calmar_ratio",
+        "profit_factor", "max_drawdown_days", "avg_trade_pnl", "longest_win_streak",
+        "longest_loss_streak", "excess_return_pct", "information_ratio",
+    ):
         if optional_col in df.columns:
             all_cols.append(optional_col)
     all_rows = df[all_cols].to_dict("records")

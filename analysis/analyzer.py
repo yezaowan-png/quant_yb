@@ -69,7 +69,7 @@ def compute_stats(df: pd.DataFrame) -> dict:
     def _avg_col(name: str, default: float = 0.0) -> float:
         if name not in df.columns or total == 0:
             return default
-        vals = df[name].dropna().values
+        vals = pd.to_numeric(df[name], errors="coerce").replace([np.inf, -np.inf], np.nan).dropna().values
         if len(vals) == 0:
             return default
         return round(float(np.mean(vals)), 4)
@@ -77,10 +77,33 @@ def compute_stats(df: pd.DataFrame) -> dict:
     def _median_col(name: str, default: float = 0.0) -> float:
         if name not in df.columns or total == 0:
             return default
-        vals = df[name].dropna().values
+        vals = pd.to_numeric(df[name], errors="coerce").replace([np.inf, -np.inf], np.nan).dropna().values
         if len(vals) == 0:
             return default
         return round(float(np.median(vals)), 4)
+
+    def _max_col(name: str, default: float = 0.0) -> float:
+        if name not in df.columns or total == 0:
+            return default
+        vals = pd.to_numeric(df[name], errors="coerce").replace([np.inf, -np.inf], np.nan).dropna().values
+        if len(vals) == 0:
+            return default
+        return round(float(np.max(vals)), 4)
+
+    def _min_col(name: str, default: float = 0.0) -> float:
+        if name not in df.columns or total == 0:
+            return default
+        vals = pd.to_numeric(df[name], errors="coerce").replace([np.inf, -np.inf], np.nan).dropna().values
+        if len(vals) == 0:
+            return default
+        return round(float(np.min(vals)), 4)
+
+    downside_returns = returns[returns < 0]
+    downside_std = float(np.std(downside_returns)) if len(downside_returns) > 1 else 0.0
+    cross_section_sortino = (
+        round(float(np.mean(returns) / downside_std), 4)
+        if downside_std > 0 else 0.0
+    )
 
     return {
         "count": total,
@@ -111,6 +134,19 @@ def compute_stats(df: pd.DataFrame) -> dict:
         "median_annual_return": round(_median_col("annual_return_pct"), 2),
         "avg_annual_volatility": round(_avg_col("annual_volatility_pct"), 2),
         "avg_calmar": round(_avg_col("calmar_ratio"), 4),
+        "avg_sortino": round(_avg_col("sortino_ratio"), 4),
+        "median_sortino": round(_median_col("sortino_ratio"), 4),
+        "cross_section_sortino": cross_section_sortino,
+        "avg_profit_factor": round(_avg_col("profit_factor"), 4),
+        "median_profit_factor": round(_median_col("profit_factor"), 4),
+        "avg_max_drawdown_days": round(_avg_col("max_drawdown_days"), 1),
+        "median_max_drawdown_days": round(_median_col("max_drawdown_days"), 1),
+        "avg_trade_pnl": round(_avg_col("avg_trade_pnl"), 2),
+        "best_trade_pnl": round(_max_col("best_trade_pnl"), 2),
+        "worst_trade_pnl": round(_min_col("worst_trade_pnl"), 2),
+        "max_win_streak": int(_max_col("longest_win_streak")),
+        "max_loss_streak": int(_max_col("longest_loss_streak")),
+        "avg_exposure": round(_avg_col("avg_exposure_pct"), 2),
         "avg_benchmark_return": round(_avg_col("benchmark_return_pct"), 2),
         "avg_excess_return": round(_avg_col("excess_return_pct"), 2),
         "avg_information_ratio": round(_avg_col("information_ratio"), 4),
@@ -183,6 +219,9 @@ def get_top_bottom(df: pd.DataFrame, n: int = 20) -> tuple[list[dict], list[dict
     sorted_df = df.sort_values("total_return_pct", ascending=False)
     top_cols = ["symbol", "total_return_pct", "sharpe_ratio", "max_drawdown_pct",
                 "win_rate_pct", "total_trades"]
+    for col in ("sortino_ratio", "profit_factor", "calmar_ratio", "max_drawdown_days"):
+        if col in sorted_df.columns:
+            top_cols.append(col)
     top = sorted_df.head(n)[top_cols].to_dict("records")
     bottom = sorted_df.tail(n)[top_cols].to_dict("records")
     return top, bottom

@@ -60,9 +60,24 @@ class EquityCurveAnalyzer(bt.Analyzer):
 def compute_drawdowns(equity: list[float]) -> list[float]:
     """计算回撤序列（正值表示回撤幅度）"""
     arr = np.array(equity)
+    if len(arr) == 0:
+        return []
     peak = np.maximum.accumulate(arr)
     dd = (arr - peak) / peak
     return (dd * 100).tolist()
+
+
+def _longest_streak(values: list[float], positive: bool) -> int:
+    longest = 0
+    current = 0
+    for value in values:
+        matched = value > 0 if positive else value < 0
+        if matched:
+            current += 1
+            longest = max(longest, current)
+        else:
+            current = 0
+    return longest
 
 
 def load_strategy_class(strategy_name: str):
@@ -492,12 +507,17 @@ class BacktestRunner:
         annual_return = 0.0
         annual_volatility = 0.0
         calmar = 0.0
+        sortino = 0.0
         if trading_days > 0 and final_value > 0:
             annual_return = ((final_value / self.cash) ** (252 / trading_days) - 1) * 100
         eq_series = pd.Series(equity_data.get("equity", []), dtype="float64")
         if len(eq_series) > 2:
             daily_returns = eq_series.pct_change().dropna()
             annual_volatility = float(daily_returns.std() * np.sqrt(252) * 100)
+            downside = daily_returns[daily_returns < 0]
+            downside_std = float(downside.std()) if len(downside) > 1 else 0.0
+            if downside_std > 0:
+                sortino = float(daily_returns.mean() / downside_std * np.sqrt(252))
 
         won = ta.get("won", {}).get("total", 0)
         lost = ta.get("lost", {}).get("total", 0)
@@ -507,6 +527,26 @@ class BacktestRunner:
         if max_drawdown:
             calmar = annual_return / max_drawdown
 
+        sell_pnls = [
+            float(rec.get("pnl", 0) or 0)
+            for rec in strat.get_trade_records()
+            if rec.get("direction") == "SELL"
+        ]
+        gross_profit = sum(pnl for pnl in sell_pnls if pnl > 0)
+        gross_loss = sum(pnl for pnl in sell_pnls if pnl < 0)
+        if gross_loss < 0:
+            profit_factor = gross_profit / abs(gross_loss)
+        elif gross_profit > 0:
+            profit_factor = float("inf")
+        else:
+            profit_factor = 0.0
+        finite_profit_factor = round(profit_factor, 4) if np.isfinite(profit_factor) else None
+        avg_trade_pnl = float(np.mean(sell_pnls)) if sell_pnls else 0.0
+        best_trade_pnl = max(sell_pnls) if sell_pnls else 0.0
+        worst_trade_pnl = min(sell_pnls) if sell_pnls else 0.0
+        exposure_vals = pd.Series(equity_data.get("exposure_pct", []), dtype="float64").dropna()
+        avg_exposure = float(exposure_vals.mean()) if len(exposure_vals) else 0.0
+
         stats = {
             "initial_cash": self.cash,
             "final_value": round(final_value, 2),
@@ -514,6 +554,16 @@ class BacktestRunner:
             "annual_return_pct": round(annual_return, 2),
             "annual_volatility_pct": round(annual_volatility, 2),
             "calmar_ratio": round(calmar, 4),
+            "sortino_ratio": round(sortino, 4),
+            "profit_factor": finite_profit_factor,
+            "gross_profit": round(gross_profit, 2),
+            "gross_loss": round(gross_loss, 2),
+            "avg_trade_pnl": round(avg_trade_pnl, 2),
+            "best_trade_pnl": round(best_trade_pnl, 2),
+            "worst_trade_pnl": round(worst_trade_pnl, 2),
+            "longest_win_streak": _longest_streak(sell_pnls, positive=True),
+            "longest_loss_streak": _longest_streak(sell_pnls, positive=False),
+            "avg_exposure_pct": round(avg_exposure, 2),
             "total_trades": total_trades,
             "win_trades": won,
             "lose_trades": lost,

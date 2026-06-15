@@ -239,6 +239,17 @@ cost:
             self.assertTrue((exp_dir / "summary.csv").exists())
             self.assertTrue((exp_dir / "manifest.json").exists())
             self.assertTrue((exp_dir / "reports" / "000001.SZ_sma_cross.html").exists())
+            summary = pd.read_csv(exp_dir / "summary.csv")
+            for col in [
+                "sortino_ratio",
+                "profit_factor",
+                "avg_trade_pnl",
+                "longest_win_streak",
+                "longest_loss_streak",
+                "max_drawdown_days",
+            ]:
+                with self.subTest(summary_column=col):
+                    self.assertIn(col, summary.columns)
 
 
 if __name__ == "__main__":

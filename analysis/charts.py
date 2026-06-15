@@ -1,5 +1,6 @@
 """Pyecharts 图表组件 —— 亮色主题"""
 
+import hashlib
 from typing import Optional
 
 import numpy as np
@@ -237,7 +238,7 @@ def create_trade_histogram(df: pd.DataFrame, strategy_name: str) -> Grid:
     """交易次数分布直方图。"""
     trades = df["total_trades"].values
     max_t = int(trades.max())
-    bins = min(max_t, 30)
+    bins = max(1, min(max_t, 30))
     hist, edges = np.histogram(trades, bins=bins)
     labels = [str(int(edges[i])) for i in range(len(edges) - 1)]
 
@@ -261,6 +262,171 @@ def create_trade_histogram(df: pd.DataFrame, strategy_name: str) -> Grid:
 
     display_name = _STRATEGY_LABELS.get(strategy_name, strategy_name)
     return _base_grid(bar, f"{display_name} — 交易次数分布", "420px")
+
+
+def _finite_series(df: pd.DataFrame, col: str) -> pd.Series:
+    if col not in df.columns:
+        return pd.Series(dtype="float64")
+    return pd.to_numeric(df[col], errors="coerce").replace([np.inf, -np.inf], np.nan).dropna()
+
+
+def create_profit_factor_histogram(df: pd.DataFrame, strategy_name: str) -> Optional[Grid]:
+    """Profit Factor 分布。无亏损导致的无限值在引擎侧留空，这里只展示可有限估计值。"""
+    vals = _finite_series(df, "profit_factor")
+    if vals.empty:
+        return None
+    vals = vals.clip(upper=10)
+    hist, edges = np.histogram(vals.values, bins=min(30, max(1, len(vals))))
+    labels = [f"{edges[i]:.2f}" for i in range(len(edges) - 1)]
+    colors = [_UP_COLOR if float(label) >= 1 else _DOWN_COLOR for label in labels]
+
+    bar = (
+        Bar()
+        .add_xaxis(labels)
+        .add_yaxis(
+            "股票数量", hist.tolist(),
+            itemstyle_opts=opts.ItemStyleOpts(color=colors),
+            label_opts=opts.LabelOpts(is_show=False),
+        )
+        .set_global_opts(
+            xaxis_opts=opts.AxisOpts(
+                name="Profit Factor（>10 截顶）",
+                axislabel_opts=opts.LabelOpts(font_size=10, color=_AXIS_LABEL_COLOR, rotate=45),
+                axisline_opts=opts.AxisLineOpts(linestyle_opts=opts.LineStyleOpts(color=_AXIS_LINE_COLOR)),
+            ),
+            yaxis_opts=_y_axis("股票数量"),
+        )
+    )
+
+    display_name = _STRATEGY_LABELS.get(strategy_name, strategy_name)
+    return _base_grid(bar, f"{display_name} — Profit Factor 分布", "420px")
+
+
+def create_drawdown_duration_histogram(df: pd.DataFrame, strategy_name: str) -> Optional[Grid]:
+    """最大回撤持续天数分布。"""
+    vals = _finite_series(df, "max_drawdown_days")
+    if vals.empty:
+        return None
+    hist, edges = np.histogram(vals.values, bins=min(30, max(1, int(vals.max()) or 1)))
+    labels = [str(int(edges[i])) for i in range(len(edges) - 1)]
+
+    bar = (
+        Bar()
+        .add_xaxis(labels)
+        .add_yaxis(
+            "股票数量", hist.tolist(),
+            itemstyle_opts=opts.ItemStyleOpts(color=_PURPLE),
+            label_opts=opts.LabelOpts(is_show=False),
+        )
+        .set_global_opts(
+            xaxis_opts=opts.AxisOpts(
+                name="最大回撤持续天数",
+                axislabel_opts=opts.LabelOpts(font_size=10, color=_AXIS_LABEL_COLOR, rotate=45),
+                axisline_opts=opts.AxisLineOpts(linestyle_opts=opts.LineStyleOpts(color=_AXIS_LINE_COLOR)),
+            ),
+            yaxis_opts=_y_axis("股票数量"),
+        )
+    )
+
+    display_name = _STRATEGY_LABELS.get(strategy_name, strategy_name)
+    return _base_grid(bar, f"{display_name} — 回撤持续时间分布", "420px")
+
+
+def create_trade_pnl_histogram(df: pd.DataFrame, strategy_name: str) -> Optional[Grid]:
+    """按单标的平均平仓 PnL 展示交易质量分布。"""
+    vals = _finite_series(df, "avg_trade_pnl")
+    if vals.empty:
+        return None
+    hist, edges = np.histogram(vals.values, bins=min(40, max(1, len(vals))))
+    labels = [f"{edges[i]:.0f}" for i in range(len(edges) - 1)]
+    colors = [_UP_COLOR if float(label) >= 0 else _DOWN_COLOR for label in labels]
+
+    bar = (
+        Bar()
+        .add_xaxis(labels)
+        .add_yaxis(
+            "股票数量", hist.tolist(),
+            itemstyle_opts=opts.ItemStyleOpts(color=colors),
+            label_opts=opts.LabelOpts(is_show=False),
+        )
+        .set_global_opts(
+            xaxis_opts=opts.AxisOpts(
+                name="平均平仓 PnL",
+                axislabel_opts=opts.LabelOpts(font_size=10, color=_AXIS_LABEL_COLOR, rotate=45),
+                axisline_opts=opts.AxisLineOpts(linestyle_opts=opts.LineStyleOpts(color=_AXIS_LINE_COLOR)),
+            ),
+            yaxis_opts=_y_axis("股票数量"),
+        )
+    )
+
+    display_name = _STRATEGY_LABELS.get(strategy_name, strategy_name)
+    return _base_grid(bar, f"{display_name} — 平均交易盈亏分布", "420px")
+
+
+def create_monte_carlo_paths(df: pd.DataFrame, strategy_name: str) -> Optional[Grid]:
+    """基于全市场单标的收益分布的简单 Monte Carlo 风险模拟。"""
+    vals = _finite_series(df, "total_return_pct") / 100.0
+    vals = vals[vals != 0]
+    if len(vals) < 5:
+        return None
+
+    seed = int(hashlib.sha256(strategy_name.encode("utf-8")).hexdigest()[:8], 16)
+    rng = np.random.default_rng(seed)
+    steps = 40
+    sims = 300
+    samples = rng.choice(vals.values, size=(sims, steps), replace=True)
+    paths = 100 * np.cumprod(1 + samples, axis=1)
+    p10 = np.percentile(paths, 10, axis=0)
+    p50 = np.percentile(paths, 50, axis=0)
+    p90 = np.percentile(paths, 90, axis=0)
+    labels = [str(i + 1) for i in range(steps)]
+
+    line = Line().add_xaxis(labels)
+    for i in range(min(12, sims)):
+        line.add_yaxis(
+            f"样本路径 {i + 1}",
+            [round(float(v), 2) for v in paths[i]],
+            symbol="none",
+            is_smooth=True,
+            linestyle_opts=opts.LineStyleOpts(color="#c9cdd8", width=1, opacity=0.35),
+            label_opts=opts.LabelOpts(is_show=False),
+        )
+    line.add_yaxis(
+        "P10",
+        [round(float(v), 2) for v in p10],
+        symbol="none",
+        is_smooth=True,
+        linestyle_opts=opts.LineStyleOpts(color=_DOWN_COLOR, width=2),
+        label_opts=opts.LabelOpts(is_show=False),
+    )
+    line.add_yaxis(
+        "P50",
+        [round(float(v), 2) for v in p50],
+        symbol="none",
+        is_smooth=True,
+        linestyle_opts=opts.LineStyleOpts(color=_BLUE, width=2.5),
+        label_opts=opts.LabelOpts(is_show=False),
+    )
+    line.add_yaxis(
+        "P90",
+        [round(float(v), 2) for v in p90],
+        symbol="none",
+        is_smooth=True,
+        linestyle_opts=opts.LineStyleOpts(color=_UP_COLOR, width=2),
+        label_opts=opts.LabelOpts(is_show=False),
+    )
+    line.set_global_opts(
+        xaxis_opts=opts.AxisOpts(
+            name="模拟步数",
+            axislabel_opts=opts.LabelOpts(font_size=11, color=_AXIS_LABEL_COLOR),
+            axisline_opts=opts.AxisLineOpts(linestyle_opts=opts.LineStyleOpts(color=_AXIS_LINE_COLOR)),
+        ),
+        yaxis_opts=_y_axis("初始 100"),
+        tooltip_opts=opts.TooltipOpts(trigger="axis"),
+    )
+
+    display_name = _STRATEGY_LABELS.get(strategy_name, strategy_name)
+    return _base_grid(line, f"{display_name} — Monte Carlo 收益路径模拟", "480px")
 
 
 # ============================================================
