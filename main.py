@@ -18,6 +18,7 @@ from cli.index_cli import index_group
 from cli.dashboard_cli import dashboard_command
 from cli.decision_cli import decision_group
 from cli.experiment_cli import experiment_group
+from cli.audit_cli import audit_group
 
 
 @click.group(invoke_without_command=True)
@@ -78,6 +79,7 @@ cli.add_command(index_group)
 cli.add_command(dashboard_command)
 cli.add_command(decision_group)
 cli.add_command(experiment_group)
+cli.add_command(audit_group)
 
 
 if __name__ == "__main__":

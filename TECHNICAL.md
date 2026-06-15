@@ -272,6 +272,26 @@ Decision Memory 中的 `future_*`、`benchmark_*` 和 `excess_*` 字段只能用
 
 这个设计可以帮助分析“信号有没有用”，但不会改变“信号如何产生”。
 
+### Lookahead Audit 未来函数审计链路
+
+`python main.py audit lookahead --strategy sma_cross` 会调用 `audit/lookahead.py::run_lookahead_audit()`，对 `strategy/` 源码做启发式静态扫描，并输出：
+
+```text
+output/audit/lookahead_audit_{strategy}.csv
+output/audit/lookahead_audit_{strategy}.html
+```
+
+第一版检查项：
+
+- `positive_bar_index`：命中 `data.open/high/low/close/volume[正数]`，Backtrader 中正向索引通常表示未来 bar。
+- `negative_shift`：命中 `.shift(-N)`，可能把未来行移到当前行。
+- `future_iloc`：命中 `.iloc[i + N]`，循环中可能读取未来行。
+- `strategy_reads_outputs`：策略源码引用 `output/`、`reports/`、`statistics/`、`decisions/` 等事后产物。
+- `current_bar_window`：命中 `range(0, ...)`，需要确认历史窗口没有把当前 bar 纳入基准。
+- `full_sample_extrema`：命中 `.max()`、`.min()`、`.mean()`、`.std()`，若作用于全样本 DataFrame 可能产生泄露。
+
+注意：该审计只是一层防线，命中项需要人工复核；未命中不代表完全证明无未来函数。平台突破等策略仍需要结合具体历史窗口实现逐行检查。
+
 ### `main.py` — 程序入口
 
 **核心思路**：利用 Click 的 `group(invoke_without_command=True)` 特性，实现"无子命令时自动进入交互模式"。

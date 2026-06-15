@@ -14,7 +14,8 @@
 5. **生成报告** — 把回测结果画成 K线图（日K/周K/月K可切换，含均线、成交量、MACD、KDJ、RSI）+ 权益曲线，存为 HTML 文件
 6. **数据统计** — 基于回测结果生成全市场策略画像和多策略对比分析报告
 7. **决策记忆** — 记录买点信号，基于未来实际交易日窗口复盘 5/10/20 日收益和相对基准表现
-8. **命令流水线** — 按顺序批量执行多条命令，支持分号分隔和脚本文件
+8. **未来函数审计** — 静态扫描策略源码里的明显未来数据/数据泄露风险
+9. **命令流水线** — 按顺序批量执行多条命令，支持分号分隔和脚本文件
 
 ## 第一次使用（环境准备）
 
@@ -90,6 +91,7 @@ quant> scan --strategy sma_cross
 quant> decision record --strategy sma_cross
 quant> decision evaluate --strategy sma_cross
 quant> decision summary --strategy sma_cross
+quant> audit lookahead --strategy sma_cross
 quant> compare --symbol 000001.SZ
 quant> report --symbol 000001.SZ --strategy sma_cross
 quant> run "download; backtest --strategy rsi; report; stats compare"
@@ -163,6 +165,9 @@ python main.py decision evaluate --strategy sma_cross --horizons 5,10,20
 
 # 查看决策记忆摘要
 python main.py decision summary --strategy sma_cross
+
+# 静态审计某个策略是否存在明显未来函数风险
+python main.py audit lookahead --strategy sma_cross
 
 # 生成报告
 python main.py backtest report --symbol 000001.SZ
@@ -704,6 +709,31 @@ quant_yb/
 | `future_5d_return_pct` / `future_10d_return_pct` / `future_20d_return_pct` | 信号后第 N 个实际交易日收益 |
 | `benchmark_5d_return_pct` / `benchmark_10d_return_pct` / `benchmark_20d_return_pct` | 同窗口基准收益 |
 | `excess_5d_return_pct` / `excess_10d_return_pct` / `excess_20d_return_pct` | 个股信号收益减基准收益 |
+
+### 7. 未来函数审计 — `audit/lookahead_*.csv`
+
+`audit lookahead` 会静态扫描 `strategy/` 下的策略源码，查找明显的未来函数和数据泄露风险，例如：
+
+- `data.close[1]` 这类 Backtrader 正向索引读取。
+- `shift(-1)` 这类把未来行移到当前行的写法。
+- 策略代码读取 `output/reports`、`output/statistics`、`output/decisions` 等事后产物。
+- 历史窗口从 `range(0, ...)` 开始，可能把当前 bar 纳入历史基准。
+
+命令：
+
+```bash
+python main.py audit lookahead --strategy sma_cross
+python main.py audit lookahead
+```
+
+输出文件：
+
+```text
+output/audit/lookahead_audit_{strategy}.csv
+output/audit/lookahead_audit_{strategy}.html
+```
+
+注意：第一版审计是启发式静态检查，命中项表示“需要人工复核”，不等于已经确认存在未来函数；未命中也不等于数学上证明完全没有数据泄露。
 
 ## 常见问题
 

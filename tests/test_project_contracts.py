@@ -7,6 +7,7 @@ import pandas as pd
 
 from decision.evaluator import evaluate_memory
 from decision.recorder import append_buy_signals, load_memory
+from audit.lookahead import run_lookahead_audit
 from data.downloader import DataDownloader
 from engine.runner import BacktestRunner, load_strategy_class
 from experiment.runner import run_experiment
@@ -57,6 +58,7 @@ class ProjectContractsTest(unittest.TestCase):
         self.assertIn("calls_per_minute: 500", text)
         self.assertIn("decisions_dir:", text)
         self.assertIn("experiments_dir:", text)
+        self.assertIn("audit_dir:", text)
         self.assertIn("decision_memory:", text)
 
     def test_decision_memory_records_and_evaluates_with_trade_days(self):
@@ -125,6 +127,17 @@ class ProjectContractsTest(unittest.TestCase):
             df = downloader.download("000001.SZ", "20260101", "20260102", force=True)
             self.assertEqual(len(df), 2)
             self.assertIn("close", df.columns)
+
+    def test_lookahead_audit_writes_reports(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            df, csv_path, html_path = run_lookahead_audit(
+                strategy="sma_cross",
+                output_dir=Path(tmp),
+            )
+            self.assertTrue(csv_path.exists())
+            self.assertTrue(html_path.exists())
+            self.assertIn("severity", df.columns)
+            self.assertIn("Lookahead Audit", html_path.read_text(encoding="utf-8"))
 
     def test_dashboard_generates_research_cockpit_from_local_outputs(self):
         with tempfile.TemporaryDirectory() as tmp:

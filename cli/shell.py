@@ -155,6 +155,11 @@ def _print_help():
     click.echo("    子命令: run")
     click.echo("    示例: experiment run experiments/sma_cross_baseline.yaml")
     click.echo()
+    click.echo("  audit           静态审计：未来函数和数据泄露启发式检查")
+    click.echo("    子命令: lookahead")
+    click.echo("    示例: audit lookahead --strategy sma_cross")
+    click.echo("          audit lookahead")
+    click.echo()
     click.secho("  放量平台突破常用命令（可直接复制）:", fg="yellow", bold=True)
     click.echo("    1) 回测全市场:")
     click.echo("       backtest --strategy volume_platform_breakout")
@@ -602,6 +607,32 @@ def _cmd_experiment(config: dict, **kwargs):
     click.echo(f"  输出目录: {manifest['output_dir']}")
 
 
+def _cmd_audit(config: dict, **kwargs):
+    sub = kwargs.get("sub") or "lookahead"
+    if isinstance(sub, bool):
+        sub = "lookahead"
+    sub = str(sub).strip().lower()
+    if sub != "lookahead":
+        click.secho("  用法: audit lookahead [--strategy 策略名]", fg="yellow")
+        return
+
+    from audit.lookahead import run_lookahead_audit
+
+    strategy = kwargs.get("strategy") or None
+    if isinstance(strategy, bool):
+        strategy = None
+    output_dir = kwargs.get("output") or config.get("output", {}).get("audit_dir", "output/audit")
+    if isinstance(output_dir, bool):
+        output_dir = "output/audit"
+    df, csv_path, html_path = run_lookahead_audit(strategy=strategy, output_dir=output_dir)
+    high = int((df["severity"] == "high").sum()) if not df.empty else 0
+    medium = int((df["severity"] == "medium").sum()) if not df.empty else 0
+    low = int((df["severity"] == "low").sum()) if not df.empty else 0
+    click.echo(f"  Lookahead Audit: High {high} | Medium {medium} | Low {low}")
+    click.echo(f"  CSV:  {csv_path}")
+    click.echo(f"  HTML: {html_path}")
+
+
 def _cmd_decision(config: dict, **kwargs):
     sub = kwargs.get("sub") or "summary"
     if isinstance(sub, bool):
@@ -760,6 +791,11 @@ def _execute_pipeline(config: dict, commands_text: str) -> None:
                 if len(parts) > 2:
                     sub_args["config_path"] = parts[2]
                 _cmd_experiment(config, **sub_args)
+            elif cmd == "audit":
+                sub = parts[1] if len(parts) > 1 else "lookahead"
+                sub_args = _parse_args(parts[2:]) if len(parts) > 2 else {}
+                sub_args["sub"] = sub
+                _cmd_audit(config, **sub_args)
             else:
                 click.secho(f'  未知命令: "{cmd}"', fg="red")
                 if not ignore_error:
@@ -888,6 +924,11 @@ def run_interactive():
                 if len(parts) > 2:
                     sub_args["config_path"] = parts[2]
                 _cmd_experiment(config, **sub_args)
+            elif cmd == "audit":
+                sub = parts[1] if len(parts) > 1 else "lookahead"
+                sub_args = _parse_args(parts[2:]) if len(parts) > 2 else {}
+                sub_args["sub"] = sub
+                _cmd_audit(config, **sub_args)
             else:
                 click.secho(f'  未知命令: "{cmd}"，输入 help 查看帮助。', fg="red")
         except KeyboardInterrupt:
