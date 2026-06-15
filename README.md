@@ -57,6 +57,18 @@ pip install -r requirements.txt
 - 打开项目里的 `config.yaml` 文件（用记事本即可）
 - 把 `token:` 后面的内容替换成你的 token
 
+### 数据源 Provider
+
+`config.yaml` 中的 `data.provider` 控制行情来源：
+
+```yaml
+data:
+  provider: "tushare"  # 可选: tushare / local_csv / akshare(占位)
+  cache_dir: "data/cache"
+```
+
+默认 `tushare` 会保持原来的 Tushare 下载和缓存行为。`local_csv` 只读取本地缓存，适合离线验证和自动化测试。`akshare` 目前只是接口占位，尚未启用真实 AKShare 下载，避免在字段口径未验证前悄悄切换数据源。
+
 ## 怎么使用？
 
 系统提供两种使用方式：**命令模式**（交互式）和**直接命令**（脚本化）。

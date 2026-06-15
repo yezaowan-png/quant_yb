@@ -83,6 +83,26 @@ generate_report()
 output/reports/{symbol}_{strategy}.html       ← 可视化报告
 ```
 
+### 数据 Provider 抽象
+
+阶段 6 后，`DataDownloader` 不再直接持有 Tushare API 调用细节，而是通过 `data/providers/` 下的 provider 接口取数据：
+
+```text
+data/providers/
+    base.py              # MarketDataProvider 接口和标准 OHLC 清洗工具
+    tushare_provider.py  # 默认 provider，保持原 Tushare 行为
+    local_csv_provider.py# 离线 provider，只读取本地 cache CSV
+    akshare_provider.py  # 占位 provider，尚未启用真实 AKShare 接口
+```
+
+责任边界：
+
+- Provider 负责返回标准化 DataFrame：`date/open/high/low/close/volume/amount`；指数数据可额外包含 `ts_code/pre_close/change/pct_chg`。
+- `DataDownloader` 继续负责缓存命中、缓存合并保存、批量进度、限流对象传入和 CLI 输出。
+- `data.provider` 默认值为 `tushare`，因此现有 `python main.py data download ...` 命令行为保持兼容。
+- `local_csv` 只读本地缓存，适合无网络、无 token 的测试和复盘；它不会补齐缺失行情。
+- `akshare` 目前只固定接口形状，显式报错，不会在未验证字段口径前 silently fallback。
+
 ---
 
 ## 各模块实现思路

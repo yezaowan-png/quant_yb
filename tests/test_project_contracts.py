@@ -7,6 +7,7 @@ import pandas as pd
 
 from decision.evaluator import evaluate_memory
 from decision.recorder import append_buy_signals, load_memory
+from data.downloader import DataDownloader
 from engine.runner import BacktestRunner, load_strategy_class
 from experiment.runner import run_experiment
 from visual.dashboard import generate_dashboard
@@ -51,6 +52,7 @@ class ProjectContractsTest(unittest.TestCase):
     def test_config_example_keeps_execution_safety_defaults(self):
         text = (ROOT / "config.example.yaml").read_text(encoding="utf-8")
         self.assertIn('token: "你的Tushare Token"', text)
+        self.assertIn('provider: "tushare"', text)
         self.assertIn("enforce_price_limits: true", text)
         self.assertIn("calls_per_minute: 500", text)
         self.assertIn("decisions_dir:", text)
@@ -92,6 +94,37 @@ class ProjectContractsTest(unittest.TestCase):
             row = memory.iloc[0]
             self.assertEqual(row["evaluation_status"], "evaluated")
             self.assertFalse(pd.isna(row["future_5d_return_pct"]))
+
+    def test_local_csv_provider_reads_cached_daily_data(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cache_dir = root / "cache"
+            cache_dir.mkdir()
+            pd.DataFrame(
+                {
+                    "date": ["20260101", "20260102"],
+                    "open": [10.0, 10.2],
+                    "high": [10.5, 10.4],
+                    "low": [9.8, 10.0],
+                    "close": [10.3, 10.1],
+                    "volume": [1000, 1200],
+                    "amount": [10000, 12120],
+                }
+            ).to_csv(cache_dir / "000001.SZ.csv", index=False)
+
+            config = {
+                "data": {"provider": "local_csv", "cache_dir": str(cache_dir)},
+                "rate_limit": {"calls_per_minute": 500},
+                "parallel": {"download_workers": 1},
+            }
+
+            downloader = DataDownloader(config)
+            self.assertEqual(downloader.provider.get_metadata().name, "local_csv")
+            stocks = downloader.get_stock_list()
+            self.assertEqual(stocks[0]["ts_code"], "000001.SZ")
+            df = downloader.download("000001.SZ", "20260101", "20260102", force=True)
+            self.assertEqual(len(df), 2)
+            self.assertIn("close", df.columns)
 
     def test_dashboard_generates_research_cockpit_from_local_outputs(self):
         with tempfile.TemporaryDirectory() as tmp:

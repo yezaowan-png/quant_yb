@@ -2,6 +2,7 @@ tushare:
   token: "你的Tushare Token"   # 在 https://tushare.pro 注册获取
 
 data:
+  provider: "tushare"       # 可选: tushare / local_csv / akshare(占位，尚未启用真实接口)
   cache_dir: "data/cache"
 
 backtest:

@@ -11,7 +11,8 @@ from typing import Optional
 import click
 import pandas as pd
 import yaml
-import tushare as ts
+
+from data.providers import create_provider
 
 
 def load_config() -> dict:
@@ -80,13 +81,10 @@ class DataDownloader:
         self.index_cache_dir = self.cache_dir / "index"
         self.index_cache_dir.mkdir(parents=True, exist_ok=True)
 
-        token = self.config["tushare"]["token"]
-        ts.set_token(token)
-        self.pro = ts.pro_api()
-
         rpm = self.config.get("rate_limit", {}).get("calls_per_minute", 200)
         self._rate_limiter = RateLimiter(rpm)
         self._max_workers = self.config.get("parallel", {}).get("download_workers", 5)
+        self.provider = create_provider(self.config, rate_limiter=self._rate_limiter)
 
     def _cache_path(self, symbol: str) -> Path:
         return self.cache_dir / f"{symbol}.csv"
@@ -154,24 +152,18 @@ class DataDownloader:
             [{"ts_code": "000001.SZ", "name": "平安银行"}, ...]
         """
         click.echo("  正在获取全A股股票列表 ...")
-        self._rate_limiter.wait()
         try:
-            df = self.pro.stock_basic(
-                exchange="",
-                list_status="L",
-                fields="ts_code,name",
-            )
+            rows = self.provider.get_stock_list()
         except Exception as e:
             click.echo(f"  获取股票列表失败: {e}", err=True)
             return []
 
-        if df is None or df.empty:
+        if not rows:
             click.echo("  股票列表为空。")
             return []
 
-        df = df[~df["name"].str.contains("ST", na=False)]
-        click.echo(f"  获取到 {len(df)} 只非ST股票。")
-        return df[["ts_code", "name"]].to_dict("records")
+        click.echo(f"  获取到 {len(rows)} 只非ST股票。")
+        return rows
 
     def download(
         self,
@@ -253,52 +245,33 @@ class DataDownloader:
         return df
 
     def _fetch_index_from_api(self, symbol: str, start: str, end: str) -> pd.DataFrame:
-        """调用 Tushare index_daily 并写入指数缓存。"""
-        self._rate_limiter.wait()
+        """Fetch index daily bars through configured provider and write cache."""
         try:
-            raw = self.pro.index_daily(
-                ts_code=symbol,
-                start_date=start,
-                end_date=end,
-                fields="ts_code,trade_date,open,high,low,close,pre_close,change,pct_chg,vol,amount",
-            )
+            df = self.provider.get_index_daily(symbol, start, end)
         except Exception as e:
-            click.echo(f"  [{symbol}] index_daily API 调用失败: {e}", err=True)
+            click.echo(f"  [{symbol}] 指数数据获取失败: {e}", err=True)
             raise
 
-        if raw is None or raw.empty:
+        if df is None or df.empty:
             raise ValueError(f"无指数数据: {symbol}")
 
-        df = self._clean_index(raw)
         self._save_index_cache(symbol, df)
         return df
 
     def _fetch_from_api(self, symbol: str, start: str, end: str) -> pd.DataFrame:
-        """通过限流器调用 Tushare API 并清洗存入缓存"""
-        self._rate_limiter.wait()
+        """Fetch daily bars through configured provider and write cache."""
         try:
             if self._is_index_symbol(symbol):
-                raw = self.pro.index_daily(
-                    ts_code=symbol,
-                    start_date=start,
-                    end_date=end,
-                    fields="trade_date,open,high,low,close,vol,amount",
-                )
+                df = self.provider.get_index_daily(symbol, start, end)
             else:
-                raw = self.pro.daily(
-                    ts_code=symbol,
-                    start_date=start,
-                    end_date=end,
-                    fields="trade_date,open,high,low,close,vol,amount",
-                )
+                df = self.provider.get_daily(symbol, start, end)
         except Exception as e:
-            click.echo(f"  [{symbol}] API 调用失败: {e}", err=True)
+            click.echo(f"  [{symbol}] 数据获取失败: {e}", err=True)
             raise
 
-        if raw is None or raw.empty:
+        if df is None or df.empty:
             raise ValueError(f"无数据: {symbol}")
 
-        df = self._clean(raw)
         self._save_cache(symbol, df)
         return df
 
@@ -333,9 +306,9 @@ class DataDownloader:
             click.echo(f"  共 {total} 只 | 缓存命中 {cached_count} 只 | 需下载 {need_api} 只")
             click.echo(f"  并行线程: {workers} | API限速: {rpm}次/分钟")
             if est_minutes >= 1:
-                click.echo(f"  ⏱ 预计约需 {est_minutes:.0f} 分钟 {est_minutes * 60:.0f} 秒")
+                click.echo(f"  预计约需 {est_minutes:.0f} 分钟 {est_minutes * 60:.0f} 秒")
             else:
-                click.echo(f"  ⏱ 预计约需 {est_minutes * 60:.0f} 秒")
+                click.echo(f"  预计约需 {est_minutes * 60:.0f} 秒")
         else:
             click.echo(f"  共 {total} 只 | 全部已缓存，直接从本地读取")
 
