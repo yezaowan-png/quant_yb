@@ -59,6 +59,7 @@ output:
   decisions_dir: "output/decisions"
   experiments_dir: "output/experiments"
   audit_dir: "output/audit"
+  portfolio_dir: "output/portfolio"
 
 decision_memory:
   enabled: true            # 扫描/批量回测导出买点时，同步记录到决策记忆

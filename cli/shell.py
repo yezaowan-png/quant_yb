@@ -160,6 +160,10 @@ def _print_help():
     click.echo("    示例: audit lookahead --strategy sma_cross")
     click.echo("          audit lookahead")
     click.echo()
+    click.echo("  portfolio       组合研究：从买点信号生成目标权重")
+    click.echo("    子命令: build")
+    click.echo("    示例: portfolio build --signals output/signals/buy_signals_sma_cross_YYYYMMDD.csv")
+    click.echo()
     click.secho("  放量平台突破常用命令（可直接复制）:", fg="yellow", bold=True)
     click.echo("    1) 回测全市场:")
     click.echo("       backtest --strategy volume_platform_breakout")
@@ -633,6 +637,34 @@ def _cmd_audit(config: dict, **kwargs):
     click.echo(f"  HTML: {html_path}")
 
 
+def _cmd_portfolio(config: dict, **kwargs):
+    sub = kwargs.get("sub") or "build"
+    if isinstance(sub, bool):
+        sub = "build"
+    sub = str(sub).strip().lower()
+    if sub != "build":
+        click.secho("  用法: portfolio build --signals <buy_signals.csv>", fg="yellow")
+        return
+
+    signals_path = kwargs.get("signals")
+    if isinstance(signals_path, bool) or not signals_path:
+        click.secho("  请提供 --signals。", fg="red")
+        return
+    from portfolio.allocator import build_target_weights
+
+    result = build_target_weights(
+        config=config,
+        signals_path=Path(signals_path),
+        method=str(kwargs.get("method") or "equal"),
+        max_weight=float(kwargs.get("max_weight") or kwargs.get("max-weight") or 0.10),
+        gross_exposure=float(kwargs.get("gross_exposure") or kwargs.get("gross-exposure") or 1.0),
+        lookback=int(kwargs.get("lookback") or 60),
+        output_dir=kwargs.get("output") or None,
+    )
+    click.secho(f"  目标权重已生成: {result.output_path}", fg="green")
+    click.echo(f"  标的 {result.count} | 总仓位 {result.gross_exposure:.2%} | 最大单股 {result.max_weight:.2%}")
+
+
 def _cmd_decision(config: dict, **kwargs):
     sub = kwargs.get("sub") or "summary"
     if isinstance(sub, bool):
@@ -796,6 +828,11 @@ def _execute_pipeline(config: dict, commands_text: str) -> None:
                 sub_args = _parse_args(parts[2:]) if len(parts) > 2 else {}
                 sub_args["sub"] = sub
                 _cmd_audit(config, **sub_args)
+            elif cmd == "portfolio":
+                sub = parts[1] if len(parts) > 1 else "build"
+                sub_args = _parse_args(parts[2:]) if len(parts) > 2 else {}
+                sub_args["sub"] = sub
+                _cmd_portfolio(config, **sub_args)
             else:
                 click.secho(f'  未知命令: "{cmd}"', fg="red")
                 if not ignore_error:
@@ -929,6 +966,11 @@ def run_interactive():
                 sub_args = _parse_args(parts[2:]) if len(parts) > 2 else {}
                 sub_args["sub"] = sub
                 _cmd_audit(config, **sub_args)
+            elif cmd == "portfolio":
+                sub = parts[1] if len(parts) > 1 else "build"
+                sub_args = _parse_args(parts[2:]) if len(parts) > 2 else {}
+                sub_args["sub"] = sub
+                _cmd_portfolio(config, **sub_args)
             else:
                 click.secho(f'  未知命令: "{cmd}"，输入 help 查看帮助。', fg="red")
         except KeyboardInterrupt:

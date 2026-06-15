@@ -15,7 +15,8 @@
 6. **数据统计** — 基于回测结果生成全市场策略画像和多策略对比分析报告
 7. **决策记忆** — 记录买点信号，基于未来实际交易日窗口复盘 5/10/20 日收益和相对基准表现
 8. **未来函数审计** — 静态扫描策略源码里的明显未来数据/数据泄露风险
-9. **命令流水线** — 按顺序批量执行多条命令，支持分号分隔和脚本文件
+9. **组合权重** — 从买点信号生成研究用候选组合和目标权重
+10. **命令流水线** — 按顺序批量执行多条命令，支持分号分隔和脚本文件
 
 ## 第一次使用（环境准备）
 
@@ -92,6 +93,7 @@ quant> decision record --strategy sma_cross
 quant> decision evaluate --strategy sma_cross
 quant> decision summary --strategy sma_cross
 quant> audit lookahead --strategy sma_cross
+quant> portfolio build --signals output/signals/buy_signals_sma_cross_YYYYMMDD.csv
 quant> compare --symbol 000001.SZ
 quant> report --symbol 000001.SZ --strategy sma_cross
 quant> run "download; backtest --strategy rsi; report; stats compare"
@@ -169,6 +171,9 @@ python main.py decision summary --strategy sma_cross
 # 静态审计某个策略是否存在明显未来函数风险
 python main.py audit lookahead --strategy sma_cross
 
+# 从买点信号生成研究用目标权重
+python main.py portfolio build --signals output/signals/buy_signals_sma_cross_YYYYMMDD.csv --method equal
+
 # 生成报告
 python main.py backtest report --symbol 000001.SZ
 
@@ -212,6 +217,7 @@ python main.py experiment run experiments/sma_cross_baseline.yaml
 - **策略汇总**：展示每个策略是否已有批量汇总、策略画像报告，以及股票数、平均收益、交易股平均收益、正收益占比、夏普和回撤。
 - **信号复盘**：读取 `output/decisions/decision_memory.csv`，展示信号总数、已评估/待评估数量、最新信号日期、5 日未来收益和 5 日超额收益。
 - **最近实验/最近报告**：扫描 `output/experiments/` 和 `output/reports/*.html`，提供最近产物入口。
+- **目标权重**：读取最新 `output/portfolio/target_weights_*.csv`，展示组合标的数、总仓位、最大单股权重和前几大权重。
 - **风险提示**：主动标注幸存者偏差、本地缓存缺失/过期、基准缺失、信号待评估和未来函数审计未接入等限制。
 
 这个面板只聚合已有本地产物，不会重新下载数据、不会运行回测，也不会改变任何 CSV 字段口径。
@@ -734,6 +740,38 @@ output/audit/lookahead_audit_{strategy}.html
 ```
 
 注意：第一版审计是启发式静态检查，命中项表示“需要人工复核”，不等于已经确认存在未来函数；未命中也不等于数学上证明完全没有数据泄露。
+
+### 8. 组合目标权重 — `portfolio/target_weights_YYYYMMDD.csv`
+
+`portfolio build` 从买点扫描 CSV 生成研究用候选组合，不会下单，也不是实盘建议。
+
+```bash
+python main.py portfolio build --signals output/signals/buy_signals_sma_cross_YYYYMMDD.csv
+python main.py portfolio build --signals output/signals/buy_signals_sma_cross_YYYYMMDD.csv --method inverse_vol --max-weight 0.10
+```
+
+支持的方法：
+
+- `equal`：等权。
+- `inverse_vol`：按本地缓存近 N 日年化波动率倒数分配权重；缺失缓存或波动率无效时标注 `fallback_equal`。
+
+输出字段：
+
+| 列名 | 含义 |
+|------|------|
+| `date` | 权重生成日期 |
+| `symbol` | 股票代码 |
+| `signal_dates` | 来源信号日期 |
+| `method` | 权重方法 |
+| `raw_weight` | 应用单股上限前的原始权重 |
+| `target_weight` | 应用单股上限后的目标权重 |
+| `max_weight` | 本次设置的单股最大权重 |
+| `gross_exposure` | 本次设置的总目标仓位 |
+| `annual_volatility` | `inverse_vol` 使用的年化波动率 |
+| `data_status` | 波动率数据状态，如 `ok`、`missing_cache`、`fallback_equal` |
+| `source` | 来源 signals CSV |
+
+如果候选股票太少，`max_weight × 股票数` 小于 `gross_exposure`，系统会优先遵守单股上限，此时实际总仓位会低于目标总仓位。
 
 ## 常见问题
 

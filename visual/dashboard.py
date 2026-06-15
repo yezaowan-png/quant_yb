@@ -362,6 +362,42 @@ def _recent_experiments(experiments_dir: Path, output_path: Path, limit: int = 6
     return rows
 
 
+def _latest_portfolio(portfolio_dir: Path, output_path: Path, limit: int = 5) -> dict[str, Any]:
+    if not portfolio_dir.exists():
+        return {"exists": False, "rows": []}
+    paths = sorted(portfolio_dir.glob("target_weights_*.csv"), key=lambda p: p.stat().st_mtime, reverse=True)
+    if not paths:
+        return {"exists": False, "rows": []}
+    path = paths[0]
+    try:
+        df = pd.read_csv(path, dtype={"symbol": str})
+    except Exception:
+        return {"exists": True, "read_error": True, "path": str(path), "rows": []}
+    if df.empty:
+        return {"exists": True, "empty": True, "path": str(path), "rows": []}
+    weights = pd.to_numeric(df.get("target_weight"), errors="coerce").fillna(0)
+    top = df.assign(_weight=weights).sort_values("_weight", ascending=False).head(limit)
+    rows = [
+        {
+            "symbol": str(row.get("symbol", "")),
+            "weight": _fmt_pct(float(row.get("_weight", 0)) * 100, 2).replace("+", ""),
+            "status": str(row.get("data_status", "")),
+        }
+        for _, row in top.iterrows()
+    ]
+    return {
+        "exists": True,
+        "path": str(path),
+        "href": _rel(output_path, path),
+        "date": str(df.get("date", pd.Series([""])).iloc[0]),
+        "method": str(df.get("method", pd.Series([""])).iloc[0]),
+        "count": int(len(df)),
+        "gross_exposure": _fmt_pct(float(weights.sum()) * 100, 2).replace("+", ""),
+        "max_weight": _fmt_pct(float(weights.max()) * 100, 2).replace("+", ""),
+        "rows": rows,
+    }
+
+
 def _risk_notes(config: dict, data: dict[str, Any]) -> list[dict[str, str]]:
     notes = [
         {
@@ -402,11 +438,20 @@ def _risk_notes(config: dict, data: dict[str, Any]) -> list[dict[str, str]]:
                 "level": "info",
             }
         )
-    if not (Path(config["output"].get("audit_dir", "output/audit")) / "lookahead_latest.html").exists():
+    audit_dir = Path(config["output"].get("audit_dir", "output/audit"))
+    if not any(audit_dir.glob("lookahead_audit_*.html")):
         notes.append(
             {
                 "title": "未来函数审计未接入",
-                "body": "阶段 7 之前 dashboard 只能展示复盘结果，不能自动证明所有策略无未来函数。",
+                "body": "尚未找到 Lookahead Audit 报告。运行 audit lookahead 后可在 output/audit 查看启发式审计结果。",
+                "level": "info",
+            }
+        )
+    if not data.get("portfolio_snapshot", {}).get("exists"):
+        notes.append(
+            {
+                "title": "组合权重未生成",
+                "body": "尚未找到 target_weights_*.csv。运行 portfolio build 可从买点信号生成研究用目标权重。",
                 "level": "info",
             }
         )
@@ -419,6 +464,7 @@ def _collect_dashboard_data(config: dict, output_path: Path) -> dict[str, Any]:
     trades_dir = Path(config["output"]["trades_dir"])
     decisions_dir = Path(config["output"].get("decisions_dir", "output/decisions"))
     experiments_dir = Path(config["output"].get("experiments_dir") or (trades_dir.parent / "experiments"))
+    portfolio_dir = Path(config["output"].get("portfolio_dir", trades_dir.parent / "portfolio"))
     index_cache_dir = Path(config["data"]["cache_dir"]) / "index"
     index_reports_dir = reports_dir / "index"
     decision_path = decisions_dir / "decision_memory.csv"
@@ -465,6 +511,7 @@ def _collect_dashboard_data(config: dict, output_path: Path) -> dict[str, Any]:
         "decision_snapshot": _decision_snapshot(decision_path),
         "recent_decisions": _recent_decisions(decision_path),
         "recent_experiments": _recent_experiments(experiments_dir, output_path),
+        "portfolio_snapshot": _latest_portfolio(portfolio_dir, output_path),
     }
     data["data_health"] = _cache_health(Path(config["data"]["cache_dir"]), index_cache_dir, indexes)
     data["market_temperature"] = _market_temperature(indexes)
@@ -534,6 +581,7 @@ def _build_kpis(data: dict[str, Any]) -> str:
     strategy_count = len(data["strategies"])
     decision_count = data["decision_snapshot"].get("count", 0)
     experiments_count = len(data["recent_experiments"])
+    portfolio_count = data.get("portfolio_snapshot", {}).get("count", 0)
     return f"""
     <section class="kpis">
       <div class="kpi"><span>指数概览</span><strong>{index_count}</strong></div>
@@ -541,6 +589,7 @@ def _build_kpis(data: dict[str, Any]) -> str:
       <div class="kpi"><span>单标的报告</span><strong>{data["stock_report_count"]}</strong></div>
       <div class="kpi"><span>信号复盘</span><strong>{decision_count}</strong></div>
       <div class="kpi"><span>实验归档</span><strong>{experiments_count}</strong></div>
+      <div class="kpi"><span>组合标的</span><strong>{portfolio_count}</strong></div>
     </section>
     """
 
@@ -672,6 +721,33 @@ def _build_experiments(data: dict[str, Any]) -> str:
         """
         for item in rows
     )
+
+
+def _build_portfolio_panel(data: dict[str, Any]) -> str:
+    snapshot = data.get("portfolio_snapshot", {})
+    if not snapshot.get("exists"):
+        return '<p class="empty">暂无目标权重</p>'
+    rows = snapshot.get("rows", [])
+    top_rows = "\n".join(
+        f"""
+        <div class="decision-row">
+          <span>{html.escape(item["symbol"])}</span>
+          <strong>{html.escape(item["weight"])}</strong>
+          <em>{html.escape(item["status"] or "--")}</em>
+          <b></b>
+        </div>
+        """
+        for item in rows
+    )
+    href = html.escape(snapshot.get("href", "#"))
+    return f"""
+      <a class="mini-link" href="{href}">
+        <span>{html.escape(snapshot.get("method", "--"))}</span>
+        <strong>{html.escape(snapshot.get("gross_exposure", "--"))} 总仓位</strong>
+        <em>{html.escape(snapshot.get("max_weight", "--"))} 最大</em>
+      </a>
+      {top_rows or '<p class="empty">暂无权重明细</p>'}
+    """
 
 
 def _build_risk_notes(data: dict[str, Any]) -> str:
@@ -901,6 +977,7 @@ def _build_html(data: dict[str, Any]) -> str:
       </div>
       <div class="right-rail">
         <aside class="side-panel"><h3>最近信号</h3><div class="mini-list">{_build_decision_panel(data)}</div></aside>
+        <aside class="side-panel"><h3>目标权重</h3><div class="mini-list">{_build_portfolio_panel(data)}</div></aside>
         <aside class="side-panel"><h3>最近实验</h3><div class="mini-list">{_build_experiments(data)}</div></aside>
         <aside class="side-panel"><h3>最近报告</h3><div class="mini-list">{_build_recent_reports(data)}</div></aside>
         <aside class="side-panel"><h3>风险提示</h3><div class="mini-list">{_build_risk_notes(data)}</div></aside>

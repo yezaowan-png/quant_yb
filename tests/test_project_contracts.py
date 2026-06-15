@@ -11,6 +11,7 @@ from audit.lookahead import run_lookahead_audit
 from data.downloader import DataDownloader
 from engine.runner import BacktestRunner, load_strategy_class
 from experiment.runner import run_experiment
+from portfolio.allocator import build_target_weights
 from visual.dashboard import generate_dashboard
 
 
@@ -46,6 +47,7 @@ class ProjectContractsTest(unittest.TestCase):
             "output/decisions/",
             "output/experiments/",
             "output/audit/",
+            "output/portfolio/",
         ]:
             with self.subTest(pattern=expected):
                 self.assertIn(expected, gitignore)
@@ -59,6 +61,7 @@ class ProjectContractsTest(unittest.TestCase):
         self.assertIn("decisions_dir:", text)
         self.assertIn("experiments_dir:", text)
         self.assertIn("audit_dir:", text)
+        self.assertIn("portfolio_dir:", text)
         self.assertIn("decision_memory:", text)
 
     def test_decision_memory_records_and_evaluates_with_trade_days(self):
@@ -139,6 +142,44 @@ class ProjectContractsTest(unittest.TestCase):
             self.assertIn("severity", df.columns)
             self.assertIn("Lookahead Audit", html_path.read_text(encoding="utf-8"))
 
+    def test_portfolio_allocator_builds_capped_weights(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cache_dir = root / "cache"
+            signals_dir = root / "signals"
+            portfolio_dir = root / "portfolio"
+            cache_dir.mkdir()
+            signals_dir.mkdir()
+            dates = pd.date_range("2026-01-01", periods=80, freq="B")
+            for idx, symbol in enumerate(["000001.SZ", "000002.SZ", "000003.SZ"]):
+                prices = [10 + idx + i * (0.02 + idx * 0.005) for i in range(len(dates))]
+                pd.DataFrame({"date": dates.strftime("%Y%m%d"), "close": prices}).to_csv(
+                    cache_dir / f"{symbol}.csv", index=False
+                )
+            signals = signals_dir / "buy_signals_sma_cross_20260430.csv"
+            pd.DataFrame(
+                {
+                    "symbol": ["000001.SZ", "000002.SZ", "000003.SZ"],
+                    "recent_buy_dates": ["2026-04-30", "2026-04-30", "2026-04-30"],
+                }
+            ).to_csv(signals, index=False)
+            config = {
+                "data": {"cache_dir": str(cache_dir)},
+                "output": {"portfolio_dir": str(portfolio_dir)},
+            }
+
+            result = build_target_weights(
+                config,
+                signals,
+                method="equal",
+                max_weight=0.40,
+                gross_exposure=1.0,
+            )
+            weights = pd.read_csv(result.output_path)
+            self.assertEqual(len(weights), 3)
+            self.assertLessEqual(weights["target_weight"].max(), 0.40)
+            self.assertIn("data_status", weights.columns)
+
     def test_dashboard_generates_research_cockpit_from_local_outputs(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -149,7 +190,8 @@ class ProjectContractsTest(unittest.TestCase):
             stats_dir = root / "statistics"
             decisions_dir = root / "decisions"
             experiments_dir = root / "experiments"
-            for path in [index_cache_dir, reports_dir / "index", trades_dir, stats_dir, decisions_dir, experiments_dir]:
+            portfolio_dir = root / "portfolio"
+            for path in [index_cache_dir, reports_dir / "index", trades_dir, stats_dir, decisions_dir, experiments_dir, portfolio_dir]:
                 path.mkdir(parents=True)
 
             pd.DataFrame(
@@ -189,6 +231,15 @@ class ProjectContractsTest(unittest.TestCase):
             (reports_dir / "000001.SZ_sma_cross.html").write_text("stock report", encoding="utf-8")
             (stats_dir / "analysis_sma_cross.html").write_text("analysis", encoding="utf-8")
             (stats_dir / "comparison.html").write_text("comparison", encoding="utf-8")
+            pd.DataFrame(
+                {
+                    "date": ["20260102"],
+                    "symbol": ["000001.SZ"],
+                    "method": ["equal"],
+                    "target_weight": [0.1],
+                    "data_status": ["ok"],
+                }
+            ).to_csv(portfolio_dir / "target_weights_20260102.csv", index=False)
             exp_dir = experiments_dir / "20260102_sma_cross"
             (exp_dir / "reports").mkdir(parents=True)
             (exp_dir / "manifest.json").write_text(
@@ -204,6 +255,7 @@ class ProjectContractsTest(unittest.TestCase):
                     "statistics_dir": str(stats_dir),
                     "decisions_dir": str(decisions_dir),
                     "experiments_dir": str(experiments_dir),
+                    "portfolio_dir": str(portfolio_dir),
                 },
                 "index_overview": {"indexes": [{"symbol": "000001.SH", "name": "上证指数"}]},
                 "benchmark": {"enabled": True, "symbol": "000300.SH"},
@@ -217,6 +269,7 @@ class ProjectContractsTest(unittest.TestCase):
             self.assertIn("数据健康", html)
             self.assertIn("策略排行榜", html)
             self.assertIn("最近实验", html)
+            self.assertIn("目标权重", html)
             self.assertIn("风险提示", html)
             self.assertIn("20260102", html)
             self.assertNotIn("20260102.0", html)

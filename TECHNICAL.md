@@ -292,6 +292,29 @@ output/audit/lookahead_audit_{strategy}.html
 
 注意：该审计只是一层防线，命中项需要人工复核；未命中不代表完全证明无未来函数。平台突破等策略仍需要结合具体历史窗口实现逐行检查。
 
+### 组合目标权重链路
+
+`python main.py portfolio build --signals output/signals/buy_signals_sma_cross_YYYYMMDD.csv` 会调用 `portfolio/allocator.py::build_target_weights()`，从买点信号生成研究用目标权重：
+
+```text
+output/signals/buy_signals_{strategy}_{date}.csv
+    │
+    ▼
+portfolio.allocator.build_target_weights()
+    │  equal / inverse_vol
+    │  max_weight cap
+    ▼
+output/portfolio/target_weights_YYYYMMDD.csv
+```
+
+设计边界：
+
+- 组合层只生成目标权重 CSV，不下单、不改变 Backtrader 回测、不改变策略信号。
+- `equal` 不依赖行情缓存；`inverse_vol` 读取 `data/cache/{symbol}.csv` 的收盘价计算近 N 日年化波动率。
+- 缓存缺失、历史不足或波动率无效时，`data_status` 会标注问题；若无法完成波动率倒数分配，会降级为等权。
+- 单股权重上限优先于总仓位。如果候选股票数太少导致无法满仓，实际 `target_weight` 总和会低于 `gross_exposure`。
+- dashboard 读取最新 `output/portfolio/target_weights_*.csv`，只展示研究产物入口和集中度摘要，不把权重反向用于策略。
+
 ### `main.py` — 程序入口
 
 **核心思路**：利用 Click 的 `group(invoke_without_command=True)` 特性，实现"无子命令时自动进入交互模式"。

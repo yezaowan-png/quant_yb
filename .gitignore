@@ -22,6 +22,7 @@ output/statistics/
 output/decisions/
 output/experiments/
 output/audit/
+output/portfolio/
 
 # 系统文件
 .DS_Store
