@@ -6,21 +6,31 @@ from typing import Optional
 
 import numpy as np
 import pandas as pd
-import yaml
+
+from project_config import load_project_config
 
 
 # 策略列表与显示名
-_STRATEGIES = ["sma_cross", "macd_cross", "kdj", "bollinger", "rsi", "single_ma"]
+_STRATEGIES = [
+    "sma_cross",
+    "macd_cross",
+    "kdj",
+    "bollinger",
+    "rsi",
+    "single_ma",
+    "volume_platform_breakout",
+    "multi_timeframe_volume_trend",
+]
 _STRATEGY_LABELS = {
     "sma_cross": "双均线交叉", "macd_cross": "MACD 金叉",
     "kdj": "KDJ", "bollinger": "布林带", "rsi": "RSI", "single_ma": "单均线",
+    "volume_platform_breakout": "放量平台突破",
+    "multi_timeframe_volume_trend": "多周期量价趋势",
 }
 
 
 def _load_config() -> dict:
-    config_path = Path(__file__).parent.parent / "config.yaml"
-    with open(config_path, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
+    return load_project_config()
 
 
 def load_summary(strategy_name: str) -> Optional[pd.DataFrame]:
@@ -54,6 +64,24 @@ def compute_stats(df: pd.DataFrame) -> dict:
 
     positive = (returns > 0).sum()
     total = len(returns)
+    active_df = df[df["total_trades"] > 0] if "total_trades" in df.columns else df.iloc[0:0]
+    active_total = len(active_df)
+
+    def _avg_col(name: str, default: float = 0.0) -> float:
+        if name not in df.columns or total == 0:
+            return default
+        vals = df[name].dropna().values
+        if len(vals) == 0:
+            return default
+        return round(float(np.mean(vals)), 4)
+
+    def _median_col(name: str, default: float = 0.0) -> float:
+        if name not in df.columns or total == 0:
+            return default
+        vals = df[name].dropna().values
+        if len(vals) == 0:
+            return default
+        return round(float(np.median(vals)), 4)
 
     return {
         "count": total,
@@ -63,6 +91,13 @@ def compute_stats(df: pd.DataFrame) -> dict:
         "positive_ratio": round(positive / total * 100, 1) if total > 0 else 0.0,
         "positive_count": int(positive),
         "negative_count": int(total - positive),
+        "active_count": int(active_total),
+        "active_ratio": round(active_total / total * 100, 1) if total > 0 else 0.0,
+        "avg_active_return": round(float(np.mean(active_df["total_return_pct"])), 2) if active_total > 0 else 0.0,
+        "avg_active_annual_return": (
+            round(float(np.mean(active_df["annual_return_pct"])), 2)
+            if active_total > 0 and "annual_return_pct" in active_df.columns else 0.0
+        ),
         "avg_sharpe": round(float(np.mean(sharpe)), 4),
         "median_sharpe": round(float(np.median(sharpe)), 4),
         "avg_max_dd": round(float(np.mean(dd)), 2),
@@ -73,6 +108,13 @@ def compute_stats(df: pd.DataFrame) -> dict:
         "median_trades": round(float(np.median(trades)), 1),
         "min_return": round(float(np.min(returns)), 2),
         "max_return": round(float(np.max(returns)), 2),
+        "avg_annual_return": round(_avg_col("annual_return_pct"), 2),
+        "median_annual_return": round(_median_col("annual_return_pct"), 2),
+        "avg_annual_volatility": round(_avg_col("annual_volatility_pct"), 2),
+        "avg_calmar": round(_avg_col("calmar_ratio"), 4),
+        "avg_benchmark_return": round(_avg_col("benchmark_return_pct"), 2),
+        "avg_excess_return": round(_avg_col("excess_return_pct"), 2),
+        "avg_information_ratio": round(_avg_col("information_ratio"), 4),
     }
 
 

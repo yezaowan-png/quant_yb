@@ -1,5 +1,6 @@
 """回测引擎 —— 封装 backtrader，输出绩效与交易流水"""
 
+import json
 import os
 import sys
 import time
@@ -14,7 +15,90 @@ import click
 import numpy as np
 import pandas as pd
 
-from strategy.base import AShareCommission
+from strategy.base import AShareCommission, price_limit_pct_for_symbol
+
+
+class ASharePandasData(bt.feeds.PandasData):
+    """日线 OHLCV feed，附带可选的预计算周线特征。
+
+    Backtrader 仍只按日线 bar 推进和成交。`weekly_*` 只是额外 line，
+    用于策略读取长周期过滤条件，不代表新增了一个可交易的周线 data feed。
+    """
+
+    lines = (
+        "weekly_close",
+        "weekly_ema_fast",
+        "weekly_ema_slow",
+        "weekly_macd_hist",
+    )
+    params = (
+        ("weekly_close", -1),
+        ("weekly_ema_fast", -1),
+        ("weekly_ema_slow", -1),
+        ("weekly_macd_hist", -1),
+    )
+
+
+class AShareBackBroker(bt.brokers.BackBroker):
+    """Backtrader broker with execution-day A-share market constraints."""
+
+    params = (
+        ("symbol", ""),
+        ("enforce_price_limits", True),
+        ("board_aware_price_limits", True),
+        ("limit_pct", 0.10),
+    )
+
+    def _set_commission_trade_date(self, order, ago) -> None:
+        comminfo = self.getcommissioninfo(order.data)
+        setter = getattr(comminfo, "set_trade_date", None)
+        if setter is None:
+            return
+        index = ago if ago is not None else 0
+        setter(order.data.datetime.date(index))
+
+    def _execute(self, order, ago=None, price=None, cash=None, position=None, dtcoc=None):
+        self._set_commission_trade_date(order, ago)
+        return super()._execute(
+            order,
+            ago=ago,
+            price=price,
+            cash=cash,
+            position=position,
+            dtcoc=dtcoc,
+        )
+
+    def _try_exec_market(self, order, popen, phigh, plow):
+        if self._blocked_by_execution_price_limit(order, popen):
+            order.cancel()
+            self.notify(order)
+            self._ococheck(order)
+            self._bracketize(order, cancel=True)
+            return
+        super()._try_exec_market(order, popen, phigh, plow)
+
+    def _blocked_by_execution_price_limit(self, order, execution_open: float) -> bool:
+        if not self.p.enforce_price_limits or len(order.data) < 2:
+            return False
+        if not self.p.coo and order.data.datetime[0] <= order.created.dt:
+            return False
+        previous_close = float(order.data.close[-1])
+        if previous_close <= 0:
+            return False
+        trade_date = order.data.datetime.date(0)
+        limit_pct = (
+            price_limit_pct_for_symbol(
+                self.p.symbol or getattr(order.data, "_name", ""),
+                trade_date,
+                fallback=float(self.p.limit_pct),
+            )
+            if self.p.board_aware_price_limits
+            else float(self.p.limit_pct)
+        )
+        execution_open = float(execution_open)
+        if order.isbuy():
+            return execution_open >= previous_close * (1 + limit_pct) * 0.999
+        return execution_open <= previous_close * (1 - limit_pct) * 1.001
 
 
 class EquityCurveAnalyzer(bt.Analyzer):
@@ -23,14 +107,38 @@ class EquityCurveAnalyzer(bt.Analyzer):
     def __init__(self):
         self.equity: list[float] = []
         self.dates: list[str] = []
+        self.cash: list[float] = []
+        self.position_size: list[int] = []
+        self.position_price: list[float] = []
+        self.position_value: list[float] = []
+        self.exposure_pct: list[float] = []
         super().__init__()
 
     def next(self):
-        self.equity.append(self.strategy.broker.getvalue())
+        equity = self.strategy.broker.getvalue()
+        cash = self.strategy.broker.getcash()
+        pos = self.strategy.getposition(self.data)
+        close = float(self.data.close[0])
+        position_value = float(pos.size) * close
+
         self.dates.append(self.data.datetime.date(0).strftime("%Y-%m-%d"))
+        self.equity.append(equity)
+        self.cash.append(cash)
+        self.position_size.append(int(pos.size))
+        self.position_price.append(float(pos.price or 0))
+        self.position_value.append(position_value)
+        self.exposure_pct.append(position_value / equity * 100 if equity else 0.0)
 
     def get_analysis(self):
-        return {"dates": self.dates, "equity": self.equity}
+        return {
+            "dates": self.dates,
+            "equity": self.equity,
+            "cash": self.cash,
+            "position_size": self.position_size,
+            "position_price": self.position_price,
+            "position_value": self.position_value,
+            "exposure_pct": self.exposure_pct,
+        }
 
 
 def compute_drawdowns(equity: list[float]) -> list[float]:
@@ -53,16 +161,113 @@ def load_strategy_class(strategy_name: str):
     return cls
 
 
+def _strategy_param_default(strategy_cls, name: str, default: Any) -> Any:
+    params = getattr(strategy_cls, "params", ())
+    if hasattr(params, "_getitems"):
+        return dict(params._getitems()).get(name, default)
+    for item in params:
+        if isinstance(item, tuple) and len(item) >= 2 and item[0] == name:
+            return item[1]
+    return default
+
+
+def _ema(series: pd.Series, period: int) -> pd.Series:
+    return series.ewm(span=period, adjust=False, min_periods=period).mean()
+
+
+def _add_completed_weekly_features(
+    df: pd.DataFrame,
+    strategy_cls,
+    strategy_params: Optional[dict],
+) -> pd.DataFrame:
+    """把“已完成周线”的 EMA/MACD 特征贴到每根日线 bar 上。
+
+    设计取舍：
+    - 不新增第二个 Backtrader 周线 feed，避免 BaseStrategy 在周线 data 上误下单。
+    - 使用日 K 重采样 `W-FRI` 得到周线收盘，再计算周线 EMA/MACD。
+    - 用 `merge_asof(direction="backward")` 回填到日线：当前日只能看到
+      日期不晚于当前日的周线特征，不能读取未来周线。
+    - 对不需要周线特征的策略也补空列，保持统一的 PandasData feed 结构。
+    """
+    if not getattr(strategy_cls, "REQUIRES_WEEKLY_FEATURES", False):
+        work = df.copy()
+        for col in ["weekly_close", "weekly_ema_fast", "weekly_ema_slow", "weekly_macd_hist"]:
+            if col not in work.columns:
+                work[col] = np.nan
+        return work
+
+    params = strategy_params or {}
+
+    def _param(name: str, default: Any) -> Any:
+        return params.get(name, _strategy_param_default(strategy_cls, name, default))
+
+    weekly_fast = int(_param("weekly_fast_ema", 13))
+    weekly_slow = int(_param("weekly_slow_ema", 26))
+    macd_fast = int(_param("weekly_macd_fast", 12))
+    macd_slow = int(_param("weekly_macd_slow", 26))
+    macd_signal = int(_param("weekly_macd_signal", 9))
+
+    work = df.sort_values("date").copy()
+    work["date"] = pd.to_datetime(work["date"])
+    daily_dates = pd.DataFrame({"date": pd.to_datetime(work["date"])})
+    # `W-FRI` 以周五作为周线时间戳；遇到节假日时，pandas 会把该周最后
+    # 一个可用交易日聚合到对应周五标签。后续 asof 只向后匹配已完成标签。
+    weekly = (
+        work.set_index("date")
+        .resample("W-FRI")
+        .agg({"close": "last"})
+        .dropna()
+        .rename(columns={"close": "weekly_close"})
+    )
+
+    weekly["weekly_ema_fast"] = _ema(weekly["weekly_close"], weekly_fast)
+    weekly["weekly_ema_slow"] = _ema(weekly["weekly_close"], weekly_slow)
+    macd_fast_line = _ema(weekly["weekly_close"], macd_fast)
+    macd_slow_line = _ema(weekly["weekly_close"], macd_slow)
+    macd_line = macd_fast_line - macd_slow_line
+    macd_signal_line = _ema(macd_line, macd_signal)
+    weekly["weekly_macd_hist"] = macd_line - macd_signal_line
+
+    features = weekly[
+        ["weekly_close", "weekly_ema_fast", "weekly_ema_slow", "weekly_macd_hist"]
+    ].reset_index()
+    # 只允许日线 bar 读取 date <= 当前日的周线特征，这是避免未来函数的关键。
+    merged = pd.merge_asof(
+        daily_dates.sort_values("date"),
+        features.sort_values("date"),
+        on="date",
+        direction="backward",
+    )
+
+    for col in ["weekly_close", "weekly_ema_fast", "weekly_ema_slow", "weekly_macd_hist"]:
+        work[col] = merged[col].to_numpy()
+    return work
+
+
 # ============================================================
 #  模块级 worker 函数 —— 供 ProcessPoolExecutor 使用
 # ============================================================
 
-def _make_executor(workers: int) -> ProcessPoolExecutor:
-    """创建进程池，兼容不同 Python 版本（max_tasks_per_child 需 3.11+）"""
-    try:
-        return ProcessPoolExecutor(max_workers=workers, max_tasks_per_child=100)
-    except TypeError:
-        return ProcessPoolExecutor(max_workers=workers)
+def _make_executor(
+    workers: int,
+    max_tasks_per_child: Optional[int] = None,
+) -> ProcessPoolExecutor:
+    """创建进程池。
+
+    之前默认 `max_tasks_per_child=100`，在 8 个 worker 时会刚好在
+    800 个任务后触发整批子进程轮换。macOS/交互式入口下这个轮换容易卡住，
+    表现为批量回测停在 800/xxxx 且没有异常。默认不轮换 worker；如果以后
+    确实需要控制子进程生命周期，可在配置中显式设置。
+    """
+    if max_tasks_per_child and max_tasks_per_child > 0:
+        try:
+            return ProcessPoolExecutor(
+                max_workers=workers,
+                max_tasks_per_child=max_tasks_per_child,
+            )
+        except TypeError:
+            return ProcessPoolExecutor(max_workers=workers)
+    return ProcessPoolExecutor(max_workers=workers)
 
 
 def _process_backtest_worker(task: dict) -> Optional[dict]:
@@ -88,7 +293,9 @@ def _process_backtest_worker(task: dict) -> Optional[dict]:
         params = {**strategy_params, "symbol": sym}
         result = runner.run(df, strategy_cls, params, verbose=False)
 
-        runner._export_trade_log(result["trade_records"], trades_dir, sym, strategy_name)
+        runner._export_trade_log(
+            result["trade_records"], trades_dir, sym, strategy_name, params
+        )
         runner._export_equity(result["equity"], trades_dir, sym, strategy_name)
 
         return {
@@ -157,8 +364,20 @@ class BacktestRunner:
         self.cash = config["backtest"]["initial_cash"]
         self.commission = config["backtest"]["commission"]
         self.stamp_duty = config["backtest"]["stamp_duty"]
+        self.stamp_duty_after_reform = config["backtest"].get("stamp_duty_after_reform", 0.0005)
+        self.date_aware_stamp_duty = config["backtest"].get("date_aware_stamp_duty", True)
         self.min_comm = config["backtest"].get("min_commission", 5.0)
+        self.slippage_perc = config["backtest"].get("slippage_perc", 0.001)
+        self.enforce_price_limits = config["backtest"].get("enforce_price_limits", True)
+        self.board_aware_price_limits = config["backtest"].get("board_aware_price_limits", True)
+        self.limit_pct = config["backtest"].get("limit_pct", 0.10)
+        self.volume_limit_ratio = config["backtest"].get("volume_limit_ratio", 0.0)
+        self.volume_unit = config["backtest"].get("volume_unit", 100)
         self._max_workers = config.get("parallel", {}).get("backtest_workers", 12)
+        self._max_tasks_per_child = config.get("parallel", {}).get(
+            "backtest_max_tasks_per_child"
+        )
+        self._benchmark_df: Optional[pd.DataFrame] = None
 
     def run(
         self,
@@ -179,9 +398,18 @@ class BacktestRunner:
             }
         """
         cerebro = bt.Cerebro()
+        cerebro.setbroker(
+            AShareBackBroker(
+                symbol=str((strategy_params or {}).get("symbol", "")),
+                enforce_price_limits=self.enforce_price_limits,
+                board_aware_price_limits=self.board_aware_price_limits,
+                limit_pct=self.limit_pct,
+            )
+        )
 
-        data_feed = bt.feeds.PandasData(
-            dataname=df.set_index("date"),
+        df_for_feed = _add_completed_weekly_features(df, strategy_cls, strategy_params)
+        data_feed = ASharePandasData(
+            dataname=df_for_feed.set_index("date"),
             datetime=None,
             open="open",
             high="high",
@@ -189,6 +417,10 @@ class BacktestRunner:
             close="close",
             volume="volume",
             openinterest=-1,
+            weekly_close="weekly_close",
+            weekly_ema_fast="weekly_ema_fast",
+            weekly_ema_slow="weekly_ema_slow",
+            weekly_macd_hist="weekly_macd_hist",
         )
         cerebro.adddata(data_feed)
 
@@ -197,12 +429,22 @@ class BacktestRunner:
         comm_info = AShareCommission(
             commission=self.commission,
             stamp_duty=self.stamp_duty,
+            stamp_duty_after_reform=self.stamp_duty_after_reform,
+            date_aware_stamp_duty=self.date_aware_stamp_duty,
             min_commission=self.min_comm,
         )
         cerebro.broker.addcommissioninfo(comm_info)
-        cerebro.broker.set_slippage_perc(0.001)
+        cerebro.broker.set_slippage_perc(self.slippage_perc)
 
         params = strategy_params or {}
+        params = {
+            **params,
+            "enforce_price_limits": self.enforce_price_limits,
+            "board_aware_price_limits": self.board_aware_price_limits,
+            "limit_pct": self.limit_pct,
+            "volume_limit_ratio": self.volume_limit_ratio,
+            "volume_unit": self.volume_unit,
+        }
         cerebro.addstrategy(strategy_cls, **params)
 
         cerebro.addanalyzer(bt.analyzers.TradeAnalyzer, _name="trades")
@@ -224,7 +466,7 @@ class BacktestRunner:
         equity_data = strat.analyzers.equity.get_analysis()
         equity_data["drawdowns"] = compute_drawdowns(equity_data["equity"])
 
-        stats = self._build_stats(strat, final_value)
+        stats = self._build_stats(strat, final_value, equity_data, df)
 
         return {
             "trade_records": strat.get_trade_records(),
@@ -234,7 +476,7 @@ class BacktestRunner:
         }
 
     # ------------------------------------------------------------
-    #  批量回测 / 扫描（ThreadPoolExecutor）
+    #  批量回测 / 扫描（ProcessPoolExecutor）
     # ------------------------------------------------------------
 
     def run_batch(
@@ -251,6 +493,7 @@ class BacktestRunner:
         summaries: list[dict] = []
         all_buy_signals: list[dict] = []
         failed = 0
+        failed_details: list[tuple[str, str]] = []
         trades_dir = Path(self.config["output"]["trades_dir"])
         trades_dir.mkdir(parents=True, exist_ok=True)
 
@@ -280,7 +523,7 @@ class BacktestRunner:
         t0 = time.monotonic()
         completed = 0
 
-        with _make_executor(workers) as executor:
+        with _make_executor(workers, self._max_tasks_per_child) as executor:
             futures = {executor.submit(_process_backtest_worker, t): t["sym"] for t in tasks}
             for future in as_completed(futures):
                 sym = futures[future]
@@ -289,11 +532,14 @@ class BacktestRunner:
                     r = future.result()
                 except Exception as e:
                     failed += 1
+                    failed_details.append((sym, str(e)))
                     click.echo(f"  [{sym}] 进程异常: {e}", err=True)
                     continue
 
                 if r is None or "error" in r:
                     failed += 1
+                    error = "无返回结果" if r is None else str(r.get("error", "未知错误"))
+                    failed_details.append((sym, error))
                     continue
 
                 stats = r["stats"]
@@ -319,6 +565,10 @@ class BacktestRunner:
         click.echo(f"  回测完成，总耗时: {elapsed:.0f} 秒 ({elapsed/60:.1f} 分钟)")
         if failed:
             click.echo(f"  失败: {failed} 只 (数据异常或指标计算失败，已自动跳过)")
+            for sym, error in failed_details[:20]:
+                click.echo(f"    - {sym}: {error}")
+            if len(failed_details) > 20:
+                click.echo(f"    ... 另有 {len(failed_details) - 20} 只失败未展开")
 
         summaries.sort(key=lambda x: x["symbol"])
         all_buy_signals.sort(key=lambda x: x["symbol"])
@@ -356,7 +606,7 @@ class BacktestRunner:
         t0 = time.monotonic()
         completed = 0
 
-        with _make_executor(workers) as executor:
+        with _make_executor(workers, self._max_tasks_per_child) as executor:
             futures = {executor.submit(_process_scan_worker, t): t["sym"] for t in tasks}
             for future in as_completed(futures):
                 completed += 1
@@ -380,40 +630,137 @@ class BacktestRunner:
     #  工具方法
     # ------------------------------------------------------------
 
-    def _build_stats(self, strat: bt.Strategy, final_value: float) -> dict[str, Any]:
+    def _load_benchmark_df(self) -> Optional[pd.DataFrame]:
+        benchmark_cfg = self.config.get("benchmark", {})
+        if not benchmark_cfg.get("enabled", True):
+            return None
+        if self._benchmark_df is not None:
+            return self._benchmark_df
+
+        symbol = benchmark_cfg.get("symbol")
+        if not symbol:
+            return None
+        path = Path(self.config["data"]["cache_dir"]) / f"{symbol}.csv"
+        if not path.exists():
+            return None
+        df = pd.read_csv(path, dtype={"date": str})
+        df["date"] = pd.to_datetime(df["date"])
+        self._benchmark_df = df.sort_values("date").reset_index(drop=True)
+        return self._benchmark_df
+
+    def _benchmark_metrics(self, equity_data: dict, data_df: pd.DataFrame) -> dict[str, Any]:
+        benchmark_df = self._load_benchmark_df()
+        if benchmark_df is None or not equity_data.get("dates"):
+            return {}
+
+        start_date = pd.Timestamp(data_df["date"].min())
+        end_date = pd.Timestamp(data_df["date"].max())
+        sub = benchmark_df[
+            (benchmark_df["date"] >= start_date) & (benchmark_df["date"] <= end_date)
+        ].copy()
+        if len(sub) < 2:
+            return {}
+
+        benchmark_return = (sub["close"].iloc[-1] / sub["close"].iloc[0] - 1) * 100
+        strategy_return = (equity_data["equity"][-1] / equity_data["equity"][0] - 1) * 100
+
+        eq = pd.DataFrame({
+            "date": pd.to_datetime(equity_data["dates"]),
+            "equity": equity_data["equity"],
+        }).set_index("date")
+        bm = sub.set_index("date")["close"]
+        joined = pd.concat([
+            eq["equity"].pct_change().rename("strategy"),
+            bm.pct_change().rename("benchmark"),
+        ], axis=1).dropna()
+
+        info_ratio = 0.0
+        if len(joined) > 2:
+            active = joined["strategy"] - joined["benchmark"]
+            active_std = active.std()
+            if active_std and not pd.isna(active_std):
+                info_ratio = float(active.mean() / active_std * np.sqrt(252))
+
+        symbol = self.config.get("benchmark", {}).get("symbol", "")
+        return {
+            "benchmark_symbol": symbol,
+            "benchmark_return_pct": round(float(benchmark_return), 2),
+            "excess_return_pct": round(float(strategy_return - benchmark_return), 2),
+            "information_ratio": round(info_ratio, 4),
+        }
+
+    def _build_stats(
+        self,
+        strat: bt.Strategy,
+        final_value: float,
+        equity_data: dict,
+        data_df: pd.DataFrame,
+    ) -> dict[str, Any]:
         ta = strat.analyzers.trades.get_analysis()
         sharpe = strat.analyzers.sharpe.get_analysis()
         dd = strat.analyzers.drawdown.get_analysis()
 
         total_return = (final_value - self.cash) / self.cash * 100
+        trading_days = len(equity_data.get("equity", []))
+        annual_return = 0.0
+        annual_volatility = 0.0
+        calmar = 0.0
+        if trading_days > 0 and final_value > 0:
+            annual_return = ((final_value / self.cash) ** (252 / trading_days) - 1) * 100
+        eq_series = pd.Series(equity_data.get("equity", []), dtype="float64")
+        if len(eq_series) > 2:
+            daily_returns = eq_series.pct_change().dropna()
+            annual_volatility = float(daily_returns.std() * np.sqrt(252) * 100)
 
         won = ta.get("won", {}).get("total", 0)
         lost = ta.get("lost", {}).get("total", 0)
         total_trades = won + lost
         win_rate = (won / total_trades * 100) if total_trades > 0 else 0.0
+        max_drawdown = dd.get("max", {}).get("drawdown", 0)
+        if max_drawdown:
+            calmar = annual_return / max_drawdown
 
-        return {
+        stats = {
             "initial_cash": self.cash,
             "final_value": round(final_value, 2),
             "total_return_pct": round(total_return, 2),
+            "annual_return_pct": round(annual_return, 2),
+            "annual_volatility_pct": round(annual_volatility, 2),
+            "calmar_ratio": round(calmar, 4),
             "total_trades": total_trades,
             "win_trades": won,
             "lose_trades": lost,
             "win_rate_pct": round(win_rate, 2),
             "sharpe_ratio": round(sharpe.get("sharperatio", 0) or 0, 4),
-            "max_drawdown_pct": round(dd.get("max", {}).get("drawdown", 0), 2),
+            "max_drawdown_pct": round(max_drawdown, 2),
             "max_drawdown_days": dd.get("max", {}).get("len", 0),
+            "start_date": data_df["date"].min().strftime("%Y-%m-%d"),
+            "end_date": data_df["date"].max().strftime("%Y-%m-%d"),
+            "trading_days": trading_days,
         }
+        stats.update(self._benchmark_metrics(equity_data, data_df))
+        return stats
 
     def _export_trade_log(
-        self, records: list[dict], trades_dir: Path, symbol: str, strategy_name: str,
+        self,
+        records: list[dict],
+        trades_dir: Path,
+        symbol: str,
+        strategy_name: str,
+        strategy_params: Optional[dict] = None,
     ) -> Path:
+        path = trades_dir / f"{symbol}_{strategy_name}.csv"
+        if strategy_params is not None:
+            params_path = path.with_suffix(".params.json")
+            params_path.write_text(
+                json.dumps(strategy_params, ensure_ascii=False, indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
         if not records:
-            return trades_dir / f"{symbol}_{strategy_name}.csv"
+            return path
         df = pd.DataFrame(records)
         columns = ["date", "symbol", "direction", "price", "size", "commission", "pnl"]
         df = df[columns]
-        path = trades_dir / f"{symbol}_{strategy_name}.csv"
         df.to_csv(path, index=False)
         return path
 

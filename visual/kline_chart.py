@@ -123,6 +123,7 @@ def create_kline_chart(
     ma10: list = None,
     ma20: list = None,
     ma60: list = None,
+    technical_structure_series: list[dict] = None,
 ) -> Grid:
     mark_data = []
 
@@ -207,6 +208,46 @@ def create_kline_chart(
             )
         )
         kline.overlap(line_ma)
+
+    # Page-neutral renderer output can also be consumed by this older
+    # pyecharts helper. Values are interpolated by category index so zooming
+    # remains aligned with the K-line bars.
+    date_index = {str(value): index for index, value in enumerate(dates)}
+    for item in technical_structure_series or []:
+        points = item.get("data") or []
+        if len(points) < 2:
+            continue
+        start, end = points[0], points[-1]
+        if str(start[0]) not in date_index or str(end[0]) not in date_index:
+            continue
+        left, right = date_index[str(start[0])], date_index[str(end[0])]
+        if right < left:
+            left, right = right, left
+            start, end = end, start
+        values = [None] * len(dates)
+        for index in range(left, right + 1):
+            ratio = 0.0 if right == left else (index - left) / (right - left)
+            values[index] = float(start[1]) + (float(end[1]) - float(start[1])) * ratio
+        style = item.get("lineStyle") or {}
+        overlay = (
+            Line()
+            .add_xaxis(dates)
+            .add_yaxis(
+                series_name=str(item.get("name") or "技术结构"),
+                y_axis=values,
+                is_smooth=False,
+                symbol="none",
+                linestyle_opts=opts.LineStyleOpts(
+                    color=style.get("color", "#111827"),
+                    width=style.get("width", 1.5),
+                    type_=style.get("type", "solid"),
+                    opacity=style.get("opacity", 0.8),
+                ),
+                label_opts=opts.LabelOpts(is_show=False),
+                is_connect_nones=False,
+            )
+        )
+        kline.overlap(overlay)
 
     grid = Grid(init_opts=opts.InitOpts(width="100%", height="500px", bg_color=_CHART_BG))
     grid.add(kline, grid_opts=opts.GridOpts(pos_top="14%", pos_bottom="10%", pos_left="10%", pos_right="5%"))

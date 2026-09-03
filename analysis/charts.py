@@ -22,11 +22,13 @@ _GREEN = "#73c0de"
 _PURPLE = "#9a7fd4"
 _RED = "#ee6666"
 _CYAN = "#3ba272"
-_STRATEGY_COLORS = ["#5470c6", "#fac858", "#ee6666", "#73c0de", "#9a7fd4", "#3ba272"]
+_STRATEGY_COLORS = ["#5470c6", "#fac858", "#ee6666", "#73c0de", "#9a7fd4", "#3ba272", "#fc8452", "#91cc75"]
 
 _STRATEGY_LABELS = {
     "sma_cross": "双均线", "macd_cross": "MACD",
     "kdj": "KDJ", "bollinger": "布林带", "rsi": "RSI", "single_ma": "单均线",
+    "volume_platform_breakout": "放量突破",
+    "multi_timeframe_volume_trend": "多周期量价",
 }
 
 

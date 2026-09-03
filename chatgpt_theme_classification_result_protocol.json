@@ -1,0 +1,317 @@
+{
+  "protocol_name": "ChatGPT 主题分类结果导入协议",
+  "protocol_version": 1,
+  "generated_from": "analysis/theme_stock_pools.py:_read_import, preview_classification_import, _assignment_from_import",
+  "scope": "stats theme-pool import 的实际输入格式。该协议描述当前代码接受、校验及忽略的字段，不是主题池内部持久化文件格式。",
+  "import_command": "python main.py stats theme-pool import --input <result.json> --dry-run",
+  "json_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "required": [
+      "schema_version",
+      "batch_id",
+      "as_of_date",
+      "classifier",
+      "stocks"
+    ],
+    "properties": {
+      "schema_version": {
+        "const": 1,
+        "description": "必填。必须为数字 1。"
+      },
+      "batch_id": {
+        "type": "string",
+        "minLength": 1,
+        "description": "必填。必须是主题池中已登记的批次 ID，例如 theme-20260902-001。"
+      },
+      "as_of_date": {
+        "type": "string",
+        "minLength": 1,
+        "description": "必填。必须与该 batch_id 登记的截止日完全一致；当前批次格式为 YYYYMMDD。"
+      },
+      "classifier": {
+        "const": "chatgpt_manual_handoff",
+        "description": "必填。固定值。"
+      },
+      "classified_at": {
+        "type": "string",
+        "description": "可选。当前导入代码不校验也不持久化，仅保留在原始导入副本中。建议 ISO-8601 时间。"
+      },
+      "stocks": {
+        "type": "array",
+        "description": "必填。可只覆盖批次中的一部分股票；当前代码不要求覆盖全部批次股票。",
+        "items": {
+          "type": "object",
+          "required": [
+            "ts_code",
+            "classification_status"
+          ],
+          "properties": {
+            "ts_code": {
+              "type": "string",
+              "pattern": "^\\d{6}\\.(SH|SZ|BJ)$",
+              "description": "必填。必须属于 batch_id 登记的 stock_codes；六位纯代码也会被代码规范化，但建议始终使用完整 ts_code。"
+            },
+            "stock_name": {
+              "type": "string",
+              "description": "可选。classified 且新增关系时会写入股票名称；其他情况下不参与校验。"
+            },
+            "classification_status": {
+              "enum": [
+                "classified",
+                "unclassified",
+                "needs_research",
+                "conflict"
+              ],
+              "description": "必填。classified 表示有一个或多个预设主题归属；其余值不会导入关系，而是进入 needs_human_attention 预览结果。"
+            },
+            "attention_reason": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "可选。仅供 unclassified、needs_research、conflict 的人工关注说明；当前代码不校验内容，也不写入主题池。"
+            },
+            "assignments": {
+              "type": "array",
+              "description": "当 classification_status=classified 时必填且至少一项；其他 classification_status 下不会读取。允许一只股票有多个不同 theme_id。",
+              "minItems": 1,
+              "items": {
+                "type": "object",
+                "required": [
+                  "theme_id",
+                  "industry_relation",
+                  "market_theme_relation",
+                  "confidence",
+                  "reason"
+                ],
+                "properties": {
+                  "theme_id": {
+                    "type": "string",
+                    "description": "主题归属。必须同时存在于该批次 allowed_theme_ids 和当前主题池 themes 中；允许同一 ts_code 对应多个不同主题，但同一股票-主题组合不得重复。"
+                  },
+                  "industry_relation": {
+                    "enum": [
+                      "core",
+                      "direct",
+                      "indirect",
+                      "unknown"
+                    ],
+                    "description": "产业属性/产业关系。"
+                  },
+                  "market_theme_relation": {
+                    "enum": [
+                      "core",
+                      "active",
+                      "catalyst",
+                      "mapping_only",
+                      "unknown"
+                    ],
+                    "description": "炒作题材/市场题材关系。"
+                  },
+                  "confidence": {
+                    "enum": [
+                      "high",
+                      "medium",
+                      "low",
+                      "unknown"
+                    ],
+                    "description": "归类置信度。"
+                  },
+                  "pool_role": {
+                    "enum": [
+                      "rs_member",
+                      "watch_only"
+                    ],
+                    "description": "可选。rs_member 表示确认后参与主题 RS；watch_only 表示确认后仅题材观察。缺省时导入按产业关系、题材关系和置信度透明推导。"
+                  },
+                  "reason": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "归类理由。实际代码会 trim，空白字符串不合法。"
+                  },
+                  "evidence": {
+                    "type": "array",
+                    "description": "可选；缺省等同空数组。证据来源列表。",
+                    "items": {
+                      "type": "object",
+                      "required": [
+                        "evidence_type",
+                        "title",
+                        "source_name",
+                        "supports"
+                      ],
+                      "properties": {
+                        "evidence_type": {
+                          "type": "string",
+                          "minLength": 1,
+                          "description": "证据类型。当前代码不限制枚举，但不能为空。"
+                        },
+                        "title": {
+                          "type": "string",
+                          "minLength": 1,
+                          "description": "证据标题。不能为空。"
+                        },
+                        "source_name": {
+                          "type": "string",
+                          "minLength": 1,
+                          "description": "证据来源名称。不能为空。"
+                        },
+                        "supports": {
+                          "type": "string",
+                          "minLength": 1,
+                          "description": "该证据支持的归类结论。不能为空。"
+                        },
+                        "url": {
+                          "type": [
+                            "string",
+                            "null"
+                          ],
+                          "description": "可选。必须为字符串或 null；当前代码不校验 URL 格式。"
+                        },
+                        "published_date": {
+                          "description": "可选。当前代码不校验，也不要求特定格式。建议 YYYY-MM-DD。"
+                        }
+                      },
+                      "additionalProperties": true
+                    }
+                  }
+                },
+                "additionalProperties": true
+              }
+            }
+          },
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "classification_status": {
+                    "const": "classified"
+                  }
+                }
+              },
+              "then": {
+                "required": [
+                  "assignments"
+                ]
+              }
+            }
+          ],
+          "additionalProperties": true
+        }
+      }
+    },
+    "additionalProperties": true
+  },
+  "runtime_constraints_not_expressible_as_static_schema": {
+    "batch_id": "必须已登记于 config/theme_stock_pools.json 的 batches。",
+    "as_of_date": "必须与已登记 batch_id 的 as_of_date 完全一致。",
+    "ts_code": "必须属于该批次的 stock_codes。",
+    "theme_id": "必须属于该批次 allowed_theme_ids，且存在于主题池 themes。",
+    "duplicate_assignment": "同一导入文件内的 (ts_code, theme_id) 不得重复。",
+    "existing_assignment": "已 manual_locked 的关系不会写入；已有 rejected 关系会标记冲突；已有不同未锁定关系会标记冲突。"
+  },
+  "field_support_matrix": {
+    "batch_id": "输入必填，校验批次存在。",
+    "ts_code": "输入必填，校验属于批次。",
+    "theme_id": "classified.assignment 输入必填，表示预设主题归属。",
+    "classification_status": "输入必填，允许 classified/unclassified/needs_research/conflict。",
+    "confidence": "classified.assignment 输入必填。",
+    "reason": "classified.assignment 输入必填，表示归类理由。",
+    "industry_relation": "classified.assignment 输入必填，表示产业属性。",
+    "market_theme_relation": "classified.assignment 输入必填，表示炒作题材关系。",
+    "pool_role": "classified.assignment 可选。缺省时：indirect、catalyst、mapping_only 优先推导为 watch_only；其余 core/direct 且 high/medium 推导为 rs_member；不满足条件时保守写为 watch_only，且导入后仍为 pending。",
+    "evidence": "classified.assignment 可选，表示证据来源。",
+    "manual_locked": "不是导入输入字段。即使回传，当前导入逻辑也会忽略，并把新增关系写成 false。人工确认或调整 pool_role 后才会设为 true。",
+    "pending": "不是 classification_status 枚举。classified 导入成功后，内部 assignment.status 固定写为 pending，任何 pool_role 都不会进入主题 RS。",
+    "confirmed": "不是导入输入状态。只能通过 stats theme-pool confirm 将已有 pending 关系确认；confirmed + rs_member 进入主题 RS，confirmed + watch_only 仅在题材观察区展示。",
+    "rejected": "不是导入输入状态。只能通过 stats theme-pool reject 将已有 pending 关系拒绝，同时内部 manual_locked 设为 true。"
+  },
+  "examples": {
+    "minimal_valid_classified": {
+      "schema_version": 1,
+      "batch_id": "theme-20260902-001",
+      "as_of_date": "20260902",
+      "classifier": "chatgpt_manual_handoff",
+      "stocks": [
+        {
+          "ts_code": "600396.SH",
+          "classification_status": "classified",
+          "assignments": [
+            {
+              "theme_id": "green_power",
+              "industry_relation": "direct",
+              "market_theme_relation": "active",
+              "confidence": "medium",
+              "reason": "示例：人工核实后确认公司业务与绿色电力主题存在直接关系。"
+            }
+          ]
+        }
+      ]
+    },
+    "one_stock_multiple_themes": {
+      "schema_version": 1,
+      "batch_id": "theme-20260902-001",
+      "as_of_date": "20260902",
+      "classifier": "chatgpt_manual_handoff",
+      "stocks": [
+        {
+          "ts_code": "600396.SH",
+          "stock_name": "华电辽能",
+          "classification_status": "classified",
+          "assignments": [
+            {
+              "theme_id": "green_power",
+              "industry_relation": "direct",
+              "market_theme_relation": "active",
+              "confidence": "high",
+              "reason": "示例：人工核实公司主营与绿色电力主题直接相关。",
+              "evidence": [
+                {
+                  "evidence_type": "company_disclosure",
+                  "title": "示例公告标题",
+                  "source_name": "公司公告",
+                  "url": null,
+                  "published_date": "2026-09-02",
+                  "supports": "披露内容支持绿色电力业务归属。"
+                }
+              ]
+            },
+            {
+              "theme_id": "energy_storage",
+              "industry_relation": "indirect",
+              "market_theme_relation": "catalyst",
+              "confidence": "low",
+              "reason": "示例：人工核实公司与储能主题存在间接产业协同及催化关联。"
+            }
+          ]
+        }
+      ]
+    },
+    "no_preset_theme": {
+      "schema_version": 1,
+      "batch_id": "theme-20260902-001",
+      "as_of_date": "20260902",
+      "classifier": "chatgpt_manual_handoff",
+      "stocks": [
+        {
+          "ts_code": "600396.SH",
+          "classification_status": "unclassified",
+          "attention_reason": "示例：未找到足以支持其属于本批次任何预设主题的主营业务或可靠题材证据。"
+        }
+      ]
+    }
+  },
+  "coverage_rule": "结果不必覆盖批次内全部股票。遗漏的股票不会报错，也不会写入任何关系。若要明确标记某股票不属于任何预设主题，应在 stocks 中回传该股票，并使用 classification_status: unclassified 和可选 attention_reason；不要为其构造空 assignments。",
+  "import_behavior": {
+    "classified": "每个合法 assignment 会提出一条新增建议。正式 import 后新增关系固定为 classification_source=chatgpt_manual_handoff、status=pending、manual_locked=false，并保存显式或推导得到的 pool_role。",
+    "unclassified": "不会写入主题关系，预览结果放入 needs_human_attention。",
+    "needs_research": "不会写入主题关系，预览结果放入 needs_human_attention。",
+    "conflict": "不会写入主题关系，预览结果放入 needs_human_attention。",
+    "invalid_entries": "只要 preview.invalid 非空，非 dry-run 的 import 也不会正式写入任何结果。"
+  },
+  "validation_result": {
+    "method": "使用真实已登记 batch_id 的 preview_classification_import 进行 dry-run 校验；不调用正式 import 写入路径。",
+    "expected": "minimal_valid_classified、one_stock_multiple_themes 与 no_preset_theme 都应通过其各自的导入前校验。多主题样例内两个 assignment 均为不同 theme_id。"
+  }
+}

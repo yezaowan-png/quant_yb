@@ -26,6 +26,7 @@ from analysis.charts import (
     create_bubble_chart,
     render_charts,
 )
+from visual.components import html_document, inline_script, script_src
 
 # ---- 亮色主题 CSS ----
 _CSS = """* { margin: 0; padding: 0; box-sizing: border-box; }
@@ -280,8 +281,20 @@ def build_analyze_page(
     # 统计卡片
     cards = [
         _build_stat_card("分析股票数", str(stats["count"]), "neutral"),
-        _build_stat_card("平均收益率", f"{stats['avg_return']:+.1f}%",
+        _build_stat_card("有交易股票", f"{stats['active_count']} ({stats['active_ratio']:.1f}%)", "neutral"),
+        _build_stat_card("平均收益率", f"{stats['avg_return']:+.2f}%",
                          "up" if stats["avg_return"] >= 0 else "down"),
+        _build_stat_card("平均年化收益", f"{stats['avg_annual_return']:+.2f}%",
+                         "up" if stats["avg_annual_return"] >= 0 else "down"),
+        _build_stat_card("交易股平均收益", f"{stats['avg_active_return']:+.2f}%",
+                         "up" if stats["avg_active_return"] >= 0 else "down"),
+        _build_stat_card("交易股平均年化", f"{stats['avg_active_annual_return']:+.2f}%",
+                         "up" if stats["avg_active_annual_return"] >= 0 else "down"),
+        _build_stat_card("平均年化波动", f"{stats['avg_annual_volatility']:.1f}%", "neutral"),
+        _build_stat_card("平均超额收益", f"{stats['avg_excess_return']:+.1f}%",
+                         "up" if stats["avg_excess_return"] >= 0 else "down"),
+        _build_stat_card("平均信息比率", f"{stats['avg_information_ratio']:.3f}",
+                         "up" if stats["avg_information_ratio"] >= 0 else "down"),
         _build_stat_card("中位数收益率", f"{stats['median_return']:+.1f}%",
                          "up" if stats["median_return"] >= 0 else "down"),
         _build_stat_card("正收益比例", f"{stats['positive_ratio']:.1f}%",
@@ -299,6 +312,10 @@ def build_analyze_page(
         "symbol": "股票代码", "total_return_pct": "收益率%",
         "sharpe_ratio": "夏普", "max_drawdown_pct": "最大回撤%",
         "win_rate_pct": "胜率%", "total_trades": "交易次数",
+        "annual_return_pct": "年化收益%",
+        "annual_volatility_pct": "年化波动%",
+        "excess_return_pct": "超额收益%",
+        "information_ratio": "信息比率",
     }
     def _relabel(rows):
         result = []
@@ -318,6 +335,9 @@ def build_analyze_page(
     # 全部股票排名表
     all_cols = ["symbol", "total_return_pct", "sharpe_ratio", "max_drawdown_pct",
                 "win_rate_pct", "total_trades"]
+    for optional_col in ("annual_return_pct", "annual_volatility_pct", "excess_return_pct", "information_ratio"):
+        if optional_col in df.columns:
+            all_cols.append(optional_col)
     all_rows = df[all_cols].to_dict("records")
     full_table = _build_table(f"全部股票排名 ({len(all_rows)} 只)", _relabel(all_rows),
                               link_col="股票代码", link_template=report_link_tpl)
@@ -326,18 +346,7 @@ def build_analyze_page(
     all_vars = [c["var"] for c in rendered if c["var"]]
     vars_json = "[" + ", ".join(all_vars) + "]"
 
-    # HTML
-    html = f"""<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>{display} — 策略统计分析</title>
-<script src="{echarts_src}"></script>
-<style>{_CSS}</style>
-</head>
-<body>
-<div class="container">
+    body = f"""<div class="container">
     <div class="topbar">
         <h1><span>{display}</span> 策略画像</h1>
         <span class="badge">QuantYB Stats</span>
@@ -352,8 +361,8 @@ def build_analyze_page(
     <div class="full-list-section">{full_table}</div>
 
     <div class="footer">QuantYB &copy; 2026 &nbsp;&middot;&nbsp; A-Share Quantitative Analysis</div>
-</div>
-<script>
+</div>"""
+    script = inline_script(f"""
 (function() {{
     var allCharts = {vars_json};
     allCharts.forEach(function(c) {{ if (c) c.group = 'stats_group'; }});
@@ -392,9 +401,14 @@ def build_analyze_page(
         }});
     }})();
 }})();
-</script>
-</body>
-</html>"""
+""")
+    html = html_document(
+        title=f"{display} — 策略统计分析",
+        body=body,
+        styles=_CSS,
+        head_extra=script_src(echarts_src),
+        scripts=script,
+    )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(html, encoding="utf-8")
@@ -424,7 +438,7 @@ def build_compare_page(
         cards.append(f"""<div class="stat-card" style="border-left: 3px solid {color};">
 <div class="stat-label">{display}</div>
 <div class="stat-value {'up' if s['avg_return'] >= 0 else 'down'}" style="font-size:20px;">{s['avg_return']:+.1f}%</div>
-<span style="font-size:11px;color:#999;">{s['count']}只 | 胜率{s['avg_win_rate']:.0f}% | 正向率{s['positive_ratio']:.0f}%</span>
+<span style="font-size:11px;color:#999;">{s['active_count']}/{s['count']}只交易 | 交易股{s['avg_active_return']:+.2f}%</span>
 <a class="card-detail-link" href="analysis_{name}.html" target="_blank">查看详情 →</a>
 </div>""")
 
@@ -453,7 +467,14 @@ def build_compare_page(
             "策略": _STRATEGY_NAMES.get(name, name),
             "_link_key": name,
             "股票数": s["count"],
-            "平均收益%": f"{s['avg_return']:+.1f}",
+            "有交易股票": s["active_count"],
+            "平均收益%": f"{s['avg_return']:+.2f}",
+            "平均年化%": f"{s['avg_annual_return']:+.2f}",
+            "交易股平均%": f"{s['avg_active_return']:+.2f}",
+            "交易股年化%": f"{s['avg_active_annual_return']:+.2f}",
+            "平均年化波动%": f"{s['avg_annual_volatility']:.1f}",
+            "平均超额%": f"{s['avg_excess_return']:+.1f}",
+            "平均信息比率": f"{s['avg_information_ratio']:.3f}",
             "中位数收益%": f"{s['median_return']:+.1f}",
             "正向率%": f"{s['positive_ratio']:.1f}",
             "平均夏普": f"{s['avg_sharpe']:.3f}",
@@ -465,14 +486,7 @@ def build_compare_page(
     summary_table_html = _build_summary_table(summary_rows,
         link_col="策略", link_template="analysis_{}.html")
 
-    html = f"""<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>策略对比分析</title>
-<script src="{echarts_src}"></script>
-<style>{_CSS}
+    compare_css = f"""{_CSS}
 .compare-cards {{
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
@@ -510,10 +524,8 @@ th.sortable-th.desc::after {{
     font-size: 9px;
     color: #26a69a;
 }}
-</style>
-</head>
-<body>
-<div class="container">
+"""
+    body = f"""<div class="container">
     <div class="topbar">
         <h1><span>策略横向对比</span> 分析报告</h1>
         <span class="badge">{len(names)} 个策略 &middot; QuantYB</span>
@@ -529,8 +541,8 @@ th.sortable-th.desc::after {{
     {_render_sections(rendered)}
 
     <div class="footer">QuantYB &copy; 2026 &nbsp;&middot;&nbsp; A-Share Quantitative Analysis</div>
-</div>
-<script>
+</div>"""
+    script = inline_script(f"""
 (function() {{
     var allCharts = {vars_json};
     allCharts.forEach(function(c) {{ if (c) c.group = 'stats_group'; }});
@@ -569,9 +581,14 @@ th.sortable-th.desc::after {{
         }});
     }})();
 }})();
-</script>
-</body>
-</html>"""
+""")
+    html = html_document(
+        title="策略对比分析",
+        body=body,
+        styles=compare_css,
+        head_extra=script_src(echarts_src),
+        scripts=script,
+    )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(html, encoding="utf-8")

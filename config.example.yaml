@@ -1,29 +1,455 @@
 tushare:
   token: "你的Tushare Token"   # 在 https://tushare.pro 注册获取
+  tokens: []                   # 可选，多账号轮换下载，例如 ["token1", "token2"]
 
 data:
   cache_dir: "data/cache"
+  meta_dir: "data/meta"          # 股票基础信息、名称映射、每日指标等元数据
+  stock_adj: "qfq"            # 股票日线复权口径: qfq=前复权, hfq=后复权, null=不复权
+
+stock_pool:
+  path: "data/stock_pools.json" # 题材股票池 JSON，形如 {"机器人": ["000001.SZ"]}
+
+limit_up_candidate_pool:
+  lookback_trade_days: 120       # 严格使用 trade_cal 的最近开市日，不回退工作日
+  trade_calendar_exchange: "SSE"
+  cache_subdir: "limit_up_events" # 位于 data.cache_dir 下，逐交易日缓存 limit_list_d
+  exclude_st: true               # 事件保留，但不进入待人工分类批次
+  exclude_beijing: true          # 北交所事件保留，但默认不进入待人工分类批次
+  exclude_recent_ipo: true       # 无涨跌幅限制阶段的新股默认不进入待人工分类批次
+  recent_ipo_trade_days: 20
+  recent_limit_up_dates_count: 5
+
+dashboard:
+  stock_selector:
+    csv_path: ""                 # 可选：股票-行业-概念映射 CSV，需含 股票代码/股票简称/行业板块/概念板块
+    generate_kline_pages: false  # true 时为有本地缓存的股票生成 reports/stock_kline/*.html 轻量 K 线页
+    kline_bars: 0                # 0=保留全部本地缓存；正数=仅保留最近 N 根日线
+    custom_boards_path: ""       # 可选：自定义板块 JSON；为空时使用 data.meta_dir/stock_selector_custom_boards.json
+
+sector_money_flow:
+  sector_names: ["半导体", "电池", "白酒", "化学制药", "能源金属", "通信设备", "汽车零部件", "软件开发", "消费电子", "银行"]
+  interval_seconds: 60           # watch 模式采集/刷新间隔；最低 5 秒
+  data_dir: "data/sector_money_flow"  # CSV 归档根目录，按 data_YYYY-MM-DD/板块数据_YYYY-MM-DD_HH-MM.csv 保存
+  history_replay_enabled: true   # 当天已有 CSV 时优先进入历史回放模式
+  report_auto_refresh: true      # 实时模式报告页按 interval_seconds 自动刷新
+
+etf_strategy:
+  cache_dir: "data/cache/etf"  # ETF 日线缓存；字段统一为 date/open/high/low/close/volume
+  holdings_dir: "data/meta/etf_holdings"  # 可选：ETF 持仓明细 CSV，支持 515880.SH.csv / 515880_SH.csv / 515880.csv
+  history_years: 10            # ETF 报告默认展示近 N 年；单只 ETF 不足 N 年时使用上市以来数据
+  adjust: "qfq"                # ETF 日线价格口径：qfq=前复权，避免拆分/折算造成未复权断崖
+  daily_datalen: 3000          # 新浪兜底日线请求长度；主数据源优先使用 Tushare fund_daily
+  min_history_bars: 2400       # 本地缓存少于该 bar 数时自动补长历史
+  kline_display_bars: 2600     # HTML K 线 payload 保留的最大日线根数，约 10 年交易日
+  pool:
+    - symbol: "515880.SH"
+      name: "通信ETF"
+    - symbol: "159919.SZ"
+      name: "沪深300ETF"
+    - symbol: "588200.SH"
+      name: "科创芯片ETF"
+    - symbol: "513000.SH"
+      name: "日经225ETF"
+    - symbol: "512760.SH"
+      name: "芯片ETF"
+  red_green_path: ""      # 可选：本地“指数通行红绿灯”CSV，不保存 FTP 敏感配置
+  rank_emotion_path: ""   # 可选：本地“指数通行红绿灯带排名和情绪”CSV
+  external_signal_dir: "data/meta/etf_external_signals"  # FTP 下载后的外部红绿灯/排名文件目录
+  ftp:
+    enabled: false        # true 时从 QTYX_352 公共 FTP 刷新 ETF 外部信号
+    auto_download: false  # true 时生成 ETF 报告前自动下载；测试可保持 false
+    server: "101.132.65.156"
+    port: 21
+    username: "QuantTraderYX"
+    password: ""  # 不提交凭据；推荐设置环境变量 QUANTYB_ETF_FTP_PASSWORD
+    encoding: "GB2312"
+    timeout: 30
+    remote_root: "/每日选股结果分享"
+    red_green_remote_dir: "ETF红绿灯信号"
+    rank_emotion_remote_dir: "红绿灯排名与情绪"
+  rank_top_n: 10
+  buy_amount: 1000000
+  smash_sell_pct: 10
+  blacklist_amounts:
+    "[海]标普油气ETF": 1000
+    "[海]中韩半导体ETF": 1000
+    "酒ETF[贵州茅台]": 1000
+  trend_position_pct:
+    上涨趋缓: 20
+    下跌趋势: 30
+    由涨转跌: 30
+  timing:
+    macd_fast: 12
+    macd_slow: 26
+    macd_signal: 9
+    kama_fast: 10
+    kama_slow: 20
+    boll_period: 20
+    boll_upper_mult: 1.2
+    boll_lower_mult: 1.2
+    break_high_days: 15
+    break_low_days: 5
+    atr_high_days: 15
+    atr_low_days: 5
+    atr_win_mult: 3.4
+    atr_loss_mult: 1.8
+  rotation:
+    momentum_window: 20
+    hold_period: 5
+    hold_count: 3
+    trend_window: 15
+    momentum_short: 5
+    momentum_long: 10
+    volume_short: 5
+    volume_long: 15
+    min_slope: 0.0
+    factor_hold_count: 1
+    trend_weight: 0.4
+    momentum_weight: 0.3
+    volume_weight: 0.3
 
 backtest:
   initial_cash: 100000.0
   commission: 0.00025        # 佣金费率 0.025%
-  stamp_duty: 0.001          # 印花税 0.1% (仅卖出)
+  stamp_duty: 0.001          # 2023-08-28 前卖出印花税 0.1%
+  stamp_duty_after_reform: 0.0005 # 2023-08-28 起卖出印花税 0.05%
+  date_aware_stamp_duty: true # 按成交日期选择印花税率
   min_commission: 5.0        # 最低佣金 5 元
+  slippage_perc: 0.001       # 滑点比例，0.001 = 0.1%
+  enforce_price_limits: true # 信号日及次日实际成交时均检查：涨停不买、跌停不卖
+  board_aware_price_limits: true # 按代码/日期识别主板10%、创业板/科创板20%、北交所30%
+  limit_pct: 0.10            # 无法识别板块时的兜底涨跌停幅度
+  volume_limit_ratio: 0.02   # 单笔成交不超过当日成交量的比例；0 表示不限制
+  volume_unit: 100           # Tushare vol 单位为手，1 手 = 100 股
+
+benchmark:
+  enabled: true
+  symbol: "000300.SH"        # 基准指数缓存文件存在时用于计算超额收益/信息比率
+
+strong_stock_radar:
+  benchmark_symbol: "000300.SH" # 强势股 RS 基准；为空时回退到 benchmark.symbol
+  history_bars: 1050
+  display_top: 300
+  universe:
+    min_listing_days: 120
+    min_avg_amount_20d: 50000000 # 元，20日平均成交额
+    max_stale_trading_days: 0
+    exclude_st: true
+    exclude_suspended: true
+    exclude_one_word_limit: true
+    one_word_limit_return_abs: 0.095
+  units:
+    volume_unit: 100        # Tushare vol 单位为手，转换为股
+    amount_unit: 1000       # Tushare amount 单位为千元，转换为元
+  rs:
+    windows: [20, 60, 120]
+    persistence_window: 20
+    persistence_threshold: 90
+    industry_stock_rs_threshold: 80
+  trend:
+    slope_window: 5
+    strong_slope_min: 0
+    mid_slope_min: 0
+  high_position:
+    windows: [20, 60, 120, 250]
+    near_high_250d: -0.08
+  volume_price:
+    healthy_min_return: 0.025
+    healthy_min_amount_ratio: 1.3
+    healthy_min_close_position: 0.7
+    effort_min_amount_ratio: 2.0
+    effort_max_return: 0.01
+    effort_max_close_position: 0.45
+    contraction_max_amount_ratio: 0.75
+    contraction_max_abs_return: 0.025
+  contraction:
+    early_volume_ma5_to_ma20_max: 0.85
+    clear_volume_ma5_to_ma20_max: 0.7
+    early_range10_to_20_max: 0.75
+    clear_range5_to_20_max: 0.45
+    near_high_250d: -0.12
+  industry:
+    strong_rs60_pct: 80
+    strong_above_ma20_pct: 0.55
+    strengthening_delta_5d: 0.03 # 原始超额收益变化，3% = 0.03
+    weakening_delta_10d: -0.05  # 原始超额收益变化，-5% = -0.05
+  industry_rs_history:
+    lookback_days: 250
+    line_default_days: 250
+    line_short_days: 120
+    heatmap_weeks: 26
+    persistence_window: 20
+    persistence_threshold: 80
+    delta_up_threshold: 5
+    delta_down_threshold: -5
+    watchlist: [] # 热力图“自选行业”，例如 ["半导体", "电力设备"]
+  state:
+    core_industry_rs60_pct: 80
+    core_rs60_pct: 90
+    core_rs120_pct: 85
+    core_persistence_min: 0.55
+    core_near_high_250d: -0.08
+    accelerating_rs60_pct: 80
+    accelerating_delta_5d: 5
+    accelerating_delta_10d: 8
+    high_tight_rs60_pct: 85
+    high_tight_near_high_250d: -0.08
+    breakout_amount_ratio_min: 1.3
+    breakout_close_position_min: 0.7
+    breakout_buffer: 0
+    weakening_rs60_pct: 80
+    weakening_delta_5d: -5
+    weakening_delta_10d: -8
+  evaluation:
+    horizons: [5, 10, 20]
+    mfe_mae_horizon: 20
+
+limit_strength:
+  data_path: "data/limit_up_database"  # 本地涨停数据库目录，文件名形如 每日涨停个股明细-YYYYMMDD.csv
+  back_days: 10
+  min_limit_count: 2
+  output_dir: "output/statistics/limit_strength"
+  output_filename: "每日强势股结果.csv"
+  exclude_name_keywords: ["ST"]
+  exclude_code_prefixes: ["83", "87", "920"]
+  focus_themes: ["机器人", "AI", "半导体", "芯片", "创新药", "华为", "算力", "低空经济", "军工", "储能"]
+  ma_windows: [20, 30, 60, 120]
+  continue_days: 3
+  enlarge_times: 1.2
+  history_days: 365
+  adjust: "qfq"
+  weights:
+    ma: 0.35
+    breakout: 0.20
+    momentum: 0.25
+    volume: 0.20
+
+support_resistance:
+  ma_periods: [20, 60, 120]
+  resonance_threshold_pct: 2.0
+  adjust: "qfq"                  # qfq=前复权，hfq=后复权，none=不复权
+  output_dir: "output/reports/support_resistance"
+
+technical_structure:
+  enabled: true
+  defaults:
+    adjustment_stock: qfq
+    adjustment_index: none
+    include_incomplete_bar: false
+    atr_period: 14
+    cache_enabled: true
+  timeframe:
+    daily:
+      pivot_reversal_atr: 1.5
+      pivot_reversal_pct_floor: 0.02
+      min_pivot_separation_bars: 3
+      horizontal_lookback_bars: 500
+      trendline_min_span_bars: 20
+      trendline_min_pair_separation_bars: 10
+      trendline_max_age_bars: 500
+      projection_bars: 30
+      level_tolerance_atr: 0.8
+      level_tolerance_pct: 0.01
+      max_candidate_pivots: 80
+      max_support: 3
+      max_resistance: 3
+      max_trendlines_per_type: 2
+      max_channels: 1
+      minimum_history_bars: 40
+    weekly:
+      pivot_reversal_atr: 1.8
+      pivot_reversal_pct_floor: 0.04
+      min_pivot_separation_bars: 2
+      horizontal_lookback_bars: 260
+      trendline_min_span_bars: 8
+      trendline_min_pair_separation_bars: 4
+      trendline_max_age_bars: 260
+      projection_bars: 12
+      level_tolerance_atr: 0.9
+      level_tolerance_pct: 0.015
+      max_candidate_pivots: 50
+      max_support: 3
+      max_resistance: 3
+      max_trendlines_per_type: 2
+      max_channels: 1
+      minimum_history_bars: 20
+    monthly:
+      pivot_reversal_atr: 2.0
+      pivot_reversal_pct_floor: 0.08
+      min_pivot_separation_bars: 1
+      horizontal_lookback_bars: 180
+      trendline_min_span_bars: 5
+      trendline_min_pair_separation_bars: 2
+      trendline_max_age_bars: 120
+      projection_bars: 6
+      level_tolerance_atr: 1.0
+      level_tolerance_pct: 0.025
+      max_candidate_pivots: 30
+      max_support: 2
+      max_resistance: 2
+      max_trendlines_per_type: 1
+      max_channels: 1
+      minimum_history_bars: 12
+  breakout:
+    atr_buffer: 0.25
+    confirmation_bars: 2
+    role_reversal_lookahead_bars: 60
+  trendline:
+    touch_tolerance_atr: 0.75
+    max_violation_atr: 0.8
+    max_violation_ratio: 0.12
+    max_anchor_penetration_atr: 0.8
+    break_confirmation_bars: 2
+    expire_after_bars: 180
+    dedup_latest_atr: 0.8
+    dedup_slope_ratio: 0.25
+    channel_min_opposite_touches: 2
+    channel_max_violation_ratio: 0.08
+    channel_max_penetration_atr: 1.5
+    show_secondary_types: false
+  overlay_timeframes:
+    daily_chart: [1d, 1w, 1mo]
+    weekly_chart: [1w, 1mo]
+    monthly_chart: [1mo]
+  manual_technical_lines: {}
+
+trendlines:
+  pivot_window: 5             # fractal 局部高低点左右窗口
+  atr_period: 20              # ATR/波动容差周期
+  tolerance_pct: 0.01         # 趋势线触碰/跌破的收盘价百分比容差
+  atr_tolerance_mult: 0.35    # 趋势线容差中的 ATR 倍数
+  max_trend_lines: 3          # 上升/下降趋势线各最多显示数量
+  support_resistance_max_levels: 8 # 支撑/压力水平位各最多显示数量
+
+index_overview:
+  default_symbol: "000001.SH" # 默认指数概览标的：上证指数
+  indexes:
+    - symbol: "000001.SH"
+      name: "上证指数"
+      market: "SH"
+    - symbol: "399001.SZ"
+      name: "深证成指"
+      market: "SZ"
+    - symbol: "399006.SZ"
+      name: "创业板指"
+      market: "SZ"
+    - symbol: "000688.SH"
+      name: "科创50"
+      market: "SH"
+    - symbol: "000300.SH"
+      name: "沪深300"
+      market: "SH"
+    - symbol: "000905.SH"
+      name: "中证500"
+      market: "SH"
+    - symbol: "000852.SH"
+      name: "中证1000"
+      market: "SH"
+    - symbol: "000985.SH"
+      name: "中证全指"
+      market: "SH"
+    - symbol: "AVG_PRICE.LOCAL"
+      name: "同花顺平均股价指数"
+      market: "A"
+
+ths_indices:
+  style_min_history_bars: 60
+  max_stale_calendar_days: 4       # 行业/概念报告过滤明显停更的 .TI 指数；日更校验也使用该阈值
+  index_list:
+    exchange: "A"
+  industries:
+    exchange: "A"
+    type: "I"
+    min_count: 1
+    min_available: 20
+  concepts:
+    exchange: "A"
+    type: "N"
+    min_count: 1
+    include_path: "ths_concept_include.csv" # 相对 data.meta_dir；删除不需要的概念行后，下载和报告都会跳过
+    limit: 500
+  style_proxies:
+    权重价值:
+      symbols: ["881155.TI", "881156.TI", "881105.TI", "881145.TI", "881180.TI"]
+      note: "银行、保险、煤炭、电力、石油加工贸易同花顺行业指数等权代理"
+    证券风险偏好:
+      symbols: ["881157.TI"]
+      note: "证券同花顺行业指数代理"
+    科技成长:
+      symbols: ["881121.TI", "881272.TI", "881129.TI", "881171.TI", "881144.TI"]
+      note: "半导体、软件开发、通信设备、自动化设备、医疗器械同花顺行业指数等权代理"
+    消费:
+      symbols: ["881133.TI", "881134.TI", "884188.TI", "881131.TI", "881125.TI", "881160.TI"]
+      note: "饮料制造、食品加工制造、白酒、白色家电、汽车整车、旅游及酒店同花顺行业指数等权代理"
+    小盘题材:
+      symbols: ["700030.TI"]
+      note: "同花顺小盘指数代理"
+  extra_symbols: []
+
+industry_market:
+  # 行业页成分股优先读取 data.meta_dir/ths_members/{行业指数}.csv 官方缓存；
+  # 默认不在 dashboard 生成时现场拉 Tushare，避免日报生成被网络/API权限拖慢。
+  # 如需补官方同花顺成分缓存，可临时设为 true 后生成一次。
+  fetch_ths_members: false
+  stock_kline_bars: 760
+
+index_forecast:
+  large_decline_threshold: -0.05 # 未来 H 日跌幅不高于 -5% 计入大跌股票比例
+  percentile_window: 756         # 子项评分使用最近约 3 年已完成样本
+  percentile_min_periods: 60     # 历史已完成样本不足时不生成环境标签
+
+index_lift_structure:
+  enabled: true
+  history_window: 252
+  min_history: 120
+  top_contributors:
+    top_n: 10
+    high_weight_quantile: 0.80
+    high_turnover_quantile: 0.80
+  turnover:
+    low_volume_ratio: 0.80
+    heavy_volume_ratio: 1.20
+  scoring:
+    participation_weight: 0.30
+    turnover_confirmation_weight: 0.25
+    contribution_dispersion_weight: 0.25
+    heavy_turnover_direction_weight: 0.20
+  display:
+    recent_days: 60
+    top_stock_count: 10
+
+llm_summary:
+  deepseek:
+    api_key_env: "DEEPSEEK_API_KEY"
+    base_url: "https://api.deepseek.com"
+    model: "deepseek-v4-flash"
+    temperature: 0.25
+    max_tokens: 3000
+    timeout_seconds: 90
 
 rate_limit:
   calls_per_minute: 500
+  safety_ratio: 0.6
+  retries: 6
+  backoff_seconds: 90
+  failed_retry_rounds: 5
+  failed_retry_wait_seconds: 180
 
 output:
   trades_dir: "output/trades"
   reports_dir: "output/reports"
   signals_dir: "output/signals"
+  statistics_dir: "output/statistics"
+  failed_downloads_dir: "output/download_failures"
 
 parallel:
   download_workers: 5
   backtest_workers: 12
+  backtest_max_tasks_per_child: null # 默认不轮换回测子进程；macOS 上轮换可能导致批量回测卡在 worker数*任务数
 
 defaults:
-  start_date: "20210101"
+  start_date: "20110101"
 
 watchlist:
   - "000001.SZ"

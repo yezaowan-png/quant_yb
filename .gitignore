@@ -1,5 +1,9 @@
 # 敏感配置（含 API token）
 config.yaml
+.env
+.env.*
+!.env.example
+.env.local
 
 # Python
 __pycache__/
@@ -11,13 +15,21 @@ __pycache__/
 .idea/
 .vscode/
 
-# 数据缓存（CSV 太大）
+# 本地数据、研究输入和运行产物
 data/cache/
+input/
+output/
 
-# 输出目录
-output/trades/
-output/reports/
-output/signals/
+# 本地主题池状态与自动备份（含人工分类、证据和审计记录）
+config/theme_stock_pools.json
+config/theme_stock_pools_backups/
+config/theme_stock_pools_imports/
+config/custom_concept_pools.yaml
+data/stock_pools_research_*.json
+
+# 本地 IDE / 浏览器自动化状态
+.claude/
+.playwright-cli/
 
 # 系统文件
 .DS_Store

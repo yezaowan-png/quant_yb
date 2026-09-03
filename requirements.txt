@@ -6,3 +6,4 @@ backtrader>=1.9.76
 pyecharts>=2.0.0
 pyyaml>=5.4.0
 openpyxl>=3.0.0
+akshare>=1.14.0

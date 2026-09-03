@@ -14,6 +14,13 @@ import click
 from cli.data_cli import data_group
 from cli.backtest_cli import backtest_group
 from cli.stats_cli import stats_group
+from cli.index_cli import index_group
+from cli.dashboard_cli import dashboard_command
+from cli.market_risk_cli import market_group
+from cli.technical_cli import technical_group
+from cli.etf_cli import etf_group
+from cli.review_cli import review_group
+from cli.sector_money_flow_cli import sector_money_flow_group
 
 
 @click.group(invoke_without_command=True)
@@ -64,12 +71,20 @@ def run_pipeline(commands: str, file_path: str):
         click.secho("请提供要执行的命令。用法: python main.py run \"cmd1; cmd2\"", fg="red")
         return
 
-    _execute_pipeline(config, commands)
+    if not _execute_pipeline(config, commands):
+        raise click.ClickException("流水线执行失败，请查看上方错误和每日任务日志。")
 
 
 cli.add_command(data_group)
 cli.add_command(backtest_group)
 cli.add_command(stats_group)
+cli.add_command(index_group)
+cli.add_command(dashboard_command)
+cli.add_command(market_group)
+cli.add_command(technical_group)
+cli.add_command(etf_group)
+cli.add_command(review_group)
+cli.add_command(sector_money_flow_group)
 
 
 if __name__ == "__main__":

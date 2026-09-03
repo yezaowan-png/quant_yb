@@ -8,6 +8,10 @@ from strategy.base import BaseStrategy
 class SingleMaStrategy(BaseStrategy):
     """收盘价上穿SMA买入，下穿卖出"""
 
+    PARAM_DEFINITIONS = {
+        "period": {"type": int, "default": 20, "help": "均线周期"},
+    }
+
     params = (
         ("period", 20),
     )

@@ -1,0 +1,127 @@
+QuantYB 每日常用命令清单
+========================
+
+使用方式
+--------
+1. 先进入项目目录，并启用当前 conda 环境：
+   cd /Users/caleb/projects/quant_prj/quant_yb
+   conda activate quant_yb
+
+2. 把下面命令里的日期按当天替换：
+   START=20260601
+   END=20260703
+   TODAY=20260703
+
+
+一、每日行情与基础数据更新
+--------------------------
+# 更新股票基础信息和名称映射
+python main.py data stock-basic --force
+
+# 下载或增量更新全市场日 K
+python main.py data download --start 20110101 --end 20260703
+
+# 下载指定个股日 K
+python main.py data download --symbol 000001.SZ --start 20110101 --end 20260703
+
+# 下载 daily_basic 指标，用于换手率、量比、市值变化等题材分析指标
+python main.py data daily-basic --start 20260703 --end 20260703
+
+# 如果上一次批量下载有失败文件，用失败文件补下载
+python main.py data download --failed-file /path/to/download_failures.csv --start 20110101 --end 20260703
+
+
+二、指数数据与大盘报告
+----------------------
+# 下载并生成全部配置指数的概览报告
+python main.py index overview --all --start 20110101 --end 20260703
+
+# 只下载指数数据，不生成报告
+python main.py index download --all --start 20110101 --end 20260703
+
+# 基于已有指数缓存生成指数报告
+python main.py index report --all
+
+# 下载主要宽基指数成分，用于大盘/分层广度
+python main.py index members --all --start 20260701 --end 20260703
+
+# 生成大盘环境看板
+python main.py index market --start 20110101 --end 20260703
+
+# 生成上证指数 5 日规则预测报告
+python main.py index forecast --symbol 000001.SH --horizon 5 --start 20110101 --end 20260703
+
+
+三、题材股票池分析
+------------------
+# 人形机器人题材看板
+python main.py stats theme --pool 人形机器人 --start 20260601 --end 20260703
+
+# AI 题材看板
+python main.py stats theme --pool AI --start 20260601 --end 20260703
+
+# 创新药题材看板
+python main.py stats theme --pool 创新药 --start 20260601 --end 20260703
+
+# 多题材并集统计
+python main.py stats theme --pool 人形机器人,AI --pool-mode any --start 20260601 --end 20260703
+
+# 多题材交集统计
+python main.py stats theme --pool 人形机器人,AI --pool-mode all --start 20260601 --end 20260703
+
+# 最近半年涨停细分股票池与基本面分析
+python main.py stats limit-research --months 6 --min-limit-count 1 --fundamental-top 120
+
+# 下载同花顺行业/风格代理指数缓存（市场结构的风格和行业强弱榜优先使用）
+python main.py index ths --start 20110101 --end 20260703
+
+
+四、策略回测、扫描和分析
+------------------------
+# 单标的回测
+python main.py backtest run --strategy multi_timeframe_volume_trend --symbol 000001.SZ
+
+# 股票池回测
+python main.py backtest run --strategy multi_timeframe_volume_trend --pool 人形机器人
+
+# 全市场批量回测
+python main.py backtest run --strategy multi_timeframe_volume_trend
+
+# 扫描最近 5 日买点
+python main.py backtest scan --strategy multi_timeframe_volume_trend --days 5
+
+# 单标的 HTML 报告
+python main.py backtest report --symbol 000001.SZ --strategy multi_timeframe_volume_trend
+
+# 手动画线页面（最近 250 根 K 线）
+python main.py backtest trendlines --symbol 000001.SZ --bars 250
+
+# 批量报告：按已有交易流水生成对应 HTML
+python main.py backtest report --strategy multi_timeframe_volume_trend
+
+# 单策略统计画像
+python main.py stats analyze --strategy multi_timeframe_volume_trend
+
+# 多策略横向对比
+python main.py stats compare
+
+
+五、总看板
+----------
+# 生成本地研究工作台，自动收录市场状态、信号流、指数、策略、单标的报告和题材看板链接
+python main.py dashboard
+
+# 打开输出文件
+open /Volumes/extend/quant_yb_data/output/reports/dashboard.html
+
+
+六、常用流水线
+--------------
+# 每日更新 + 同花顺行业/风格指数 + 指数/大盘/预测 + 三个题材 + 总看板
+python main.py run "stock-basic --force; download --start 20110101 --end 20260703; daily-basic --start 20260703 --end 20260703; index ths --start 20110101 --end 20260703; index overview --all --start 20110101 --end 20260703; index members --all --start 20260701 --end 20260703; index market --start 20110101 --end 20260703; index forecast --symbol 000001.SH --horizon 5 --start 20110101 --end 20260703; stats theme --pool 人形机器人 --start 20260601 --end 20260703; stats theme --pool AI --start 20260601 --end 20260703; stats theme --pool 创新药 --start 20260601 --end 20260703; dashboard"
+
+# 策略研究流水线
+python main.py run "backtest --strategy multi_timeframe_volume_trend --pool 人形机器人; scan --strategy multi_timeframe_volume_trend --days 5; report --strategy multi_timeframe_volume_trend; stats analyze --strategy multi_timeframe_volume_trend; dashboard"
+
+# 只刷新题材和总看板
+python main.py run "stats theme --pool 人形机器人 --start 20260601 --end 20260703; stats theme --pool AI --start 20260601 --end 20260703; stats theme --pool 创新药 --start 20260601 --end 20260703; dashboard"
