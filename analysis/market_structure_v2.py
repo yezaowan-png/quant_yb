@@ -8,7 +8,7 @@ LLM modules.
 
 from __future__ import annotations
 
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 import hashlib
 import json
 from pathlib import Path
@@ -46,6 +46,14 @@ from analysis.market_structure_state_v2 import (
 SCHEMA_VERSION = "market_structure_v2"
 ALGORITHM_VERSION = "2.0.0"
 DEFAULT_HISTORY_DAYS = 60
+# 分层广度需要覆盖一个完整的中期观察窗口。该窗口只影响展示和
+# 历史导出长度，不改变任何状态计算或其他 v2 模块的留存长度。
+DEFAULT_LAYERED_BREADTH_HISTORY_DAYS = 126
+# Concentration analysis uses a 756-day percentile window and retains a small
+# warm-up margin.  Other v2 components need at most a 252-day rolling window.
+# Keep this as an implementation bound only; it does not change persisted
+# history length or any market-state threshold.
+V2_MIN_PANEL_HISTORY_ROWS = 816
 
 INDEX_LAYERS: tuple[dict[str, Any], ...] = (
     {"name": "上证50", "symbol": "000016.SH", "member_codes": ("000016.SH",)},
@@ -57,6 +65,48 @@ INDEX_LAYERS: tuple[dict[str, Any], ...] = (
     {"name": "科创50", "symbol": "000688.SH", "member_codes": ("000688.SH",), "fallback_market": "科创板"},
     {"name": "深市", "symbol": "399001.SZ", "member_codes": ("399001.SZ",), "fallback_exchange": "SZSE"},
 )
+
+
+@dataclass(frozen=True)
+class IndustryDailyFrames:
+    """Shared industry aggregation inputs for concentration and liquidity."""
+
+    daily_returns: pd.DataFrame
+    traded: pd.DataFrame
+    amounts: pd.DataFrame
+    industry_returns: pd.DataFrame
+    industry_amounts: pd.DataFrame
+    industry_amount_ratios: pd.DataFrame
+
+
+def _build_industry_daily_frames(
+    *,
+    close: pd.DataFrame,
+    amount: pd.DataFrame,
+    industry_groups: dict[str, list[str]],
+) -> IndustryDailyFrames:
+    """Compute industry return and turnover matrices once for v2 consumers."""
+    daily_returns = close.pct_change(fill_method=None)
+    traded = amount.notna() & amount.gt(0)
+    returns_by_industry: dict[str, pd.Series] = {}
+    amounts_by_industry: dict[str, pd.Series] = {}
+    ratios_by_industry: dict[str, pd.Series] = {}
+    for industry, symbols in industry_groups.items():
+        selected = [symbol for symbol in symbols if symbol in close.columns]
+        if not selected:
+            continue
+        industry_amount = amount[selected].where(traded[selected]).sum(axis=1, min_count=1)
+        returns_by_industry[industry] = daily_returns[selected].where(traded[selected]).mean(axis=1, skipna=True)
+        amounts_by_industry[industry] = industry_amount
+        ratios_by_industry[industry] = industry_amount / industry_amount.rolling(20, min_periods=20).mean()
+    return IndustryDailyFrames(
+        daily_returns=daily_returns,
+        traded=traded,
+        amounts=amount,
+        industry_returns=pd.DataFrame(returns_by_industry, index=close.index),
+        industry_amounts=pd.DataFrame(amounts_by_industry, index=close.index),
+        industry_amount_ratios=pd.DataFrame(ratios_by_industry, index=close.index),
+    )
 
 
 def _json_default(value: Any) -> Any:
@@ -714,19 +764,19 @@ def build_concentration_analysis(
     index_member_frames: dict[str, pd.DataFrame],
     source_freshness: dict[str, dict[str, Any]],
     history_days: int,
+    industry_daily_frames: IndustryDailyFrames | None = None,
 ) -> tuple[dict[str, Any], list[str]]:
     dates = pd.DatetimeIndex(close.index[-min(len(close), 816):])
-    daily = close.pct_change(fill_method=None).reindex(dates)
-    daily_amount = amount.reindex(dates)
-    valid = daily.notna() & daily_amount.notna() & daily_amount.gt(0)
-    industry_returns = pd.DataFrame(index=dates)
-    industry_amounts = pd.DataFrame(index=dates)
-    for industry, symbols in industry_groups.items():
-        selected = [symbol for symbol in symbols if symbol in close.columns]
-        if not selected:
-            continue
-        industry_returns[industry] = daily[selected].where(valid[selected]).mean(axis=1, skipna=True)
-        industry_amounts[industry] = daily_amount[selected].where(daily_amount[selected].gt(0)).sum(axis=1, min_count=1)
+    industry_daily_frames = industry_daily_frames or _build_industry_daily_frames(
+        close=close,
+        amount=amount,
+        industry_groups=industry_groups,
+    )
+    daily = industry_daily_frames.daily_returns.reindex(dates)
+    daily_amount = industry_daily_frames.amounts.reindex(dates)
+    valid = industry_daily_frames.traded.reindex(dates) & daily.notna()
+    industry_returns = industry_daily_frames.industry_returns.reindex(dates)
+    industry_amounts = industry_daily_frames.industry_amounts.reindex(dates)
 
     member_priority: list[str] = [primary_symbol.upper()]
     if primary_symbol.upper() == "000300.SH":
@@ -1299,10 +1349,16 @@ def build_liquidity_structure(
     industry_groups: dict[str, list[str]],
     source_freshness: dict[str, dict[str, Any]],
     history_days: int,
+    industry_daily_frames: IndustryDailyFrames | None = None,
 ) -> dict[str, Any]:
     dates = pd.DatetimeIndex(close.index)
-    daily = close.pct_change(fill_method=None)
-    traded = amount.notna() & amount.gt(0)
+    industry_daily_frames = industry_daily_frames or _build_industry_daily_frames(
+        close=close,
+        amount=amount,
+        industry_groups=industry_groups,
+    )
+    daily = industry_daily_frames.daily_returns
+    traded = industry_daily_frames.traded
     total = amount.where(traded).sum(axis=1, min_count=1)
     total_ma5 = total.rolling(5, min_periods=5).mean()
     total_ma20 = total.rolling(20, min_periods=20).mean()
@@ -1321,17 +1377,9 @@ def build_liquidity_structure(
     if "trade_date" in breadth.columns:
         breadth["trade_date"] = pd.to_datetime(breadth["trade_date"], errors="coerce")
         breadth = breadth.dropna(subset=["trade_date"]).set_index("trade_date")
-    industry_returns = pd.DataFrame(index=dates)
-    industry_amounts = pd.DataFrame(index=dates)
-    industry_amount_ratios = pd.DataFrame(index=dates)
-    for industry, symbols in industry_groups.items():
-        selected = [symbol for symbol in symbols if symbol in close.columns]
-        if not selected:
-            continue
-        industry_returns[industry] = daily[selected].where(traded[selected]).mean(axis=1, skipna=True)
-        industry_total = amount[selected].where(traded[selected]).sum(axis=1, min_count=1)
-        industry_amounts[industry] = industry_total
-        industry_amount_ratios[industry] = industry_total / industry_total.rolling(20, min_periods=20).mean()
+    industry_returns = industry_daily_frames.industry_returns
+    industry_amounts = industry_daily_frames.industry_amounts
+    industry_amount_ratios = industry_daily_frames.industry_amount_ratios
     rows: list[dict[str, Any]] = []
     for date in dates[-max(history_days, 60):]:
         amount_ratio_5d = finite(total.loc[date] / total_ma5.loc[date])
@@ -1777,14 +1825,27 @@ def build_market_structure_v2(
     config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build every v2 fact/state/research layer from existing local inputs."""
-    close = panels.close.copy()
-    amount = panels.amount.reindex(index=close.index, columns=close.columns).copy()
-    metadata = panels.metadata.copy()
-    cutoff = pd.to_datetime(as_of, errors="coerce") if as_of is not None else pd.to_datetime(close.index, errors="coerce").max()
+    source_close = panels.close
+    metadata = panels.metadata
+    cutoff = pd.to_datetime(as_of, errors="coerce") if as_of is not None else pd.to_datetime(source_close.index, errors="coerce").max()
     if pd.isna(cutoff):
         raise ValueError("market_structure_v2 requires a valid as_of date")
-    close = close.loc[pd.to_datetime(close.index, errors="coerce") <= cutoff].sort_index()
-    amount = amount.reindex(index=close.index, columns=close.columns)
+    history_days = max(20, int((config or {}).get("history_days", DEFAULT_HISTORY_DAYS)))
+    layered_breadth_history_days = max(
+        history_days,
+        int((config or {}).get("layered_breadth_history_days", DEFAULT_LAYERED_BREADTH_HISTORY_DAYS)),
+    )
+    # Retain enough prehistory for the longest v2 rolling calculation while
+    # avoiding full-history matrix copies after the legacy structure has
+    # already produced its long-form output.
+    panel_rows = max(V2_MIN_PANEL_HISTORY_ROWS, history_days + 252)
+    close = (
+        source_close.loc[pd.to_datetime(source_close.index, errors="coerce") <= cutoff]
+        .sort_index()
+        .tail(panel_rows)
+        .copy()
+    )
+    amount = panels.amount.reindex(index=close.index, columns=close.columns).copy()
     if close.empty:
         raise ValueError("market_structure_v2 has no stock facts at or before as_of")
     cutoff = pd.Timestamp(close.index[-1])
@@ -1813,10 +1874,14 @@ def build_market_structure_v2(
         if not work.empty:
             clipped_ths[str(symbol).upper()] = work.reset_index(drop=True)
 
-    history_days = max(20, int((config or {}).get("history_days", DEFAULT_HISTORY_DAYS)))
     style_symbol_groups = style_symbol_groups or {}
     style_industry_groups = style_industry_groups or {}
     industry_groups = industry_groups or {}
+    industry_daily_frames = _build_industry_daily_frames(
+        close=close,
+        amount=amount,
+        industry_groups=industry_groups,
+    )
     freshness = build_source_freshness(
         close=close,
         amount=amount,
@@ -1836,7 +1901,7 @@ def build_market_structure_v2(
         index_frames=clipped_indices,
         style_symbol_groups=style_symbol_groups,
         source_freshness=freshness,
-        history_days=history_days,
+        history_days=layered_breadth_history_days,
     )
     concentration, concentration_flags = build_concentration_analysis(
         primary_symbol=primary_symbol,
@@ -1846,6 +1911,7 @@ def build_market_structure_v2(
         index_member_frames=member_frames,
         source_freshness=freshness,
         history_days=history_days,
+        industry_daily_frames=industry_daily_frames,
     )
     distribution = build_return_distribution(
         close=close,
@@ -1894,6 +1960,7 @@ def build_market_structure_v2(
         industry_groups=industry_groups,
         source_freshness=freshness,
         history_days=history_days,
+        industry_daily_frames=industry_daily_frames,
     )
     repair = build_repair_structure(
         breadth_history=breadth_history,
@@ -2029,6 +2096,7 @@ def build_market_structure_v2(
     )
     algorithm_config = {
         "history_days": history_days,
+        "layered_breadth_history_days": layered_breadth_history_days,
         "state_tracker": asdict(StateTrackerConfig()),
         "concentration_percentile_thresholds": [0.60, 0.80, 0.95],
         "risk_smoothing_days": [3, 5],

@@ -1799,6 +1799,7 @@ def save_market_structure_outputs(config: dict, symbol: str, structure: dict[str
         "styles": root / f"market_structure_styles_{symbol.upper()}.csv",
         "style_history": root / f"market_structure_style_history_{symbol.upper()}.csv",
         "layered_breadth": root / f"market_structure_layered_breadth_{symbol.upper()}.csv",
+        "layered_breadth_history": root / f"market_structure_layered_breadth_history_{symbol.upper()}.csv",
         "concentration": root / f"market_structure_concentration_{symbol.upper()}.csv",
         "return_distribution": root / f"market_structure_return_distribution_{symbol.upper()}.csv",
         "liquidity_structure": root / f"market_structure_liquidity_{symbol.upper()}.csv",
@@ -1832,6 +1833,22 @@ def save_market_structure_outputs(config: dict, symbol: str, structure: dict[str
             }
         )
     pd.DataFrame(layered_rows).to_csv(paths["layered_breadth"], index=False)
+    layered_history_rows = []
+    for name, item in (structure.get("layered_breadth") or {}).items():
+        for row in item.get("history") or []:
+            layered_history_rows.append(
+                {
+                    "layer": name,
+                    "symbol": item.get("symbol"),
+                    "state": item.get("state"),
+                    "composition_point_in_time": item.get("composition_point_in_time"),
+                    "membership_source": item.get("membership_source"),
+                    **row,
+                }
+            )
+    pd.DataFrame(layered_history_rows).to_csv(
+        paths["layered_breadth_history"], index=False, encoding="utf-8-sig"
+    )
     pd.DataFrame((structure.get("contribution_analysis") or {}).get("history") or []).to_csv(paths["concentration"], index=False)
     pd.DataFrame((structure.get("return_distribution") or {}).get("history") or []).to_csv(paths["return_distribution"], index=False)
     pd.DataFrame((structure.get("liquidity_structure") or {}).get("history") or []).to_csv(paths["liquidity_structure"], index=False)

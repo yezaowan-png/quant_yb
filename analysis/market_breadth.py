@@ -14,6 +14,72 @@ def _parse_date_bound(value: str | None) -> pd.Timestamp | None:
     return pd.to_datetime(str(value), format="%Y%m%d", errors="coerce")
 
 
+def _load_breadth_events(
+    path: Path,
+    *,
+    start_ts: pd.Timestamp | None,
+    end_ts: pd.Timestamp | None,
+    nhnl_lookback: int,
+) -> pd.DataFrame:
+    """Read one stock cache and return the daily breadth events it contributes."""
+    try:
+        df = pd.read_csv(path, usecols=["date", "close"], dtype={"date": str})
+    except Exception:
+        return pd.DataFrame()
+    if df.empty:
+        return pd.DataFrame()
+    df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    df["close"] = pd.to_numeric(df["close"], errors="coerce")
+    df = df.dropna(subset=["date", "close"]).sort_values("date")
+    if len(df) < 2:
+        return pd.DataFrame()
+    df["prev_close"] = df["close"].shift(1)
+    if nhnl_lookback > 1:
+        rolling_close = df["close"]
+        df["new_high_signal"] = df["close"] >= rolling_close.rolling(
+            nhnl_lookback, min_periods=nhnl_lookback
+        ).max() - 1e-9
+        df["new_low_signal"] = df["close"] <= rolling_close.rolling(
+            nhnl_lookback, min_periods=nhnl_lookback
+        ).min() + 1e-9
+    else:
+        df["new_high_signal"] = False
+        df["new_low_signal"] = False
+    df = df.dropna(subset=["prev_close"])
+    if start_ts is not None:
+        df = df[df["date"] >= start_ts]
+    if end_ts is not None:
+        df = df[df["date"] <= end_ts]
+    if df.empty:
+        return pd.DataFrame()
+    return pd.DataFrame(
+        {
+            "date": df["date"].dt.strftime("%Y-%m-%d"),
+            "delta": df["close"] - df["prev_close"],
+            "new_high_signal": df["new_high_signal"],
+            "new_low_signal": df["new_low_signal"],
+        }
+    )
+
+
+def _add_breadth_events(counts: dict[str, dict[str, int]], events: pd.DataFrame) -> None:
+    for date_key, delta, is_new_high, is_new_low in events.itertuples(index=False, name=None):
+        bucket = counts.setdefault(
+            str(date_key),
+            {"up": 0, "down": 0, "flat": 0, "new_high": 0, "new_low": 0},
+        )
+        if float(delta) > 1e-9:
+            bucket["up"] += 1
+        elif float(delta) < -1e-9:
+            bucket["down"] += 1
+        else:
+            bucket["flat"] += 1
+        if bool(is_new_high):
+            bucket["new_high"] += 1
+        if bool(is_new_low):
+            bucket["new_low"] += 1
+
+
 def build_market_breadth(
     cache_dir: str | Path,
     start: str | None = None,
@@ -46,61 +112,60 @@ def build_market_breadth(
         symbol = path.stem.upper()
         if symbol_filter is not None and symbol not in symbol_filter:
             continue
-        try:
-            df = pd.read_csv(path, usecols=["date", "close"], dtype={"date": str})
-        except Exception:
-            continue
-        if df.empty:
-            continue
-
-        df["date"] = pd.to_datetime(df["date"], errors="coerce")
-        df["close"] = pd.to_numeric(df["close"], errors="coerce")
-        df = df.dropna(subset=["date", "close"]).sort_values("date")
-        if len(df) < 2:
-            continue
-
-        df["prev_close"] = df["close"].shift(1)
-        if nhnl_lookback > 1:
-            rolling_close = df["close"]
-            df["rolling_high"] = rolling_close.rolling(nhnl_lookback, min_periods=nhnl_lookback).max()
-            df["rolling_low"] = rolling_close.rolling(nhnl_lookback, min_periods=nhnl_lookback).min()
-            df["new_high_signal"] = df["close"] >= df["rolling_high"] - 1e-9
-            df["new_low_signal"] = df["close"] <= df["rolling_low"] + 1e-9
-        else:
-            df["new_high_signal"] = False
-            df["new_low_signal"] = False
-        df = df.dropna(subset=["prev_close"])
-        if start_ts is not None:
-            df = df[df["date"] >= start_ts]
-        if end_ts is not None:
-            df = df[df["date"] <= end_ts]
-        if df.empty:
-            continue
-
-        diff = df["close"] - df["prev_close"]
-        for date_value, delta, is_new_high, is_new_low in zip(
-            df["date"],
-            diff,
-            df["new_high_signal"],
-            df["new_low_signal"],
-        ):
-            date_key = pd.Timestamp(date_value).strftime("%Y-%m-%d")
-            bucket = counts.setdefault(
-                date_key,
-                {"up": 0, "down": 0, "flat": 0, "new_high": 0, "new_low": 0},
-            )
-            if float(delta) > 1e-9:
-                bucket["up"] += 1
-            elif float(delta) < -1e-9:
-                bucket["down"] += 1
-            else:
-                bucket["flat"] += 1
-            if bool(is_new_high):
-                bucket["new_high"] += 1
-            if bool(is_new_low):
-                bucket["new_low"] += 1
+        events = _load_breadth_events(
+            path,
+            start_ts=start_ts,
+            end_ts=end_ts,
+            nhnl_lookback=nhnl_lookback,
+        )
+        if not events.empty:
+            _add_breadth_events(counts, events)
 
     return dict(sorted(counts.items()))
+
+
+def build_market_breadth_groups(
+    cache_dir: str | Path,
+    groups: dict[str, set[str] | list[str]],
+    start: str | None = None,
+    end: str | None = None,
+    nhnl_lookback: int = 252,
+) -> dict[str, dict[str, dict[str, int]]]:
+    """Build multiple member breadth series in one stock-cache scan.
+
+    Group membership is supplied by the caller and may overlap.  Each stock is
+    parsed once, then contributes to every group that contains it.
+    """
+    root = Path(cache_dir)
+    if not root.exists() or not groups:
+        return {}
+    start_ts = _parse_date_bound(start)
+    end_ts = _parse_date_bound(end)
+    symbol_to_groups: dict[str, list[str]] = {}
+    for group_name, symbols in groups.items():
+        for symbol in {str(item).upper() for item in symbols}:
+            symbol_to_groups.setdefault(symbol, []).append(str(group_name))
+    counts_by_group = {str(group_name): {} for group_name in groups}
+    for path in root.glob("*.csv"):
+        if path.name.startswith("_"):
+            continue
+        matched_groups = symbol_to_groups.get(path.stem.upper())
+        if not matched_groups:
+            continue
+        events = _load_breadth_events(
+            path,
+            start_ts=start_ts,
+            end_ts=end_ts,
+            nhnl_lookback=nhnl_lookback,
+        )
+        if events.empty:
+            continue
+        for group_name in matched_groups:
+            _add_breadth_events(counts_by_group[group_name], events)
+    return {
+        group_name: dict(sorted(counts.items()))
+        for group_name, counts in counts_by_group.items()
+    }
 
 
 def load_latest_index_member_symbols(

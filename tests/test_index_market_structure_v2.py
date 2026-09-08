@@ -21,6 +21,8 @@ from analysis.market_structure_state_v2 import (
     classify_return_distribution,
 )
 from analysis.market_structure_v2 import (
+    V2_MIN_PANEL_HISTORY_ROWS,
+    _build_industry_daily_frames,
     _layer_row,
     _member_snapshot,
     _top_fraction_share,
@@ -262,6 +264,13 @@ class IndexMarketStructureV2Test(unittest.TestCase):
             if history:
                 self.assertLessEqual(max(row["trade_date"] for row in history), self.result["point_in_time"]["as_of"])
 
+    def test_v2_01b_layered_breadth_retains_six_month_observation_window(self):
+        history = self.result["layered_breadth"]["全A"]["history"]
+        self.assertEqual(len(history), 126)
+        self.assertIn("advance_ratio", history[-1])
+        self.assertIn("pct_above_ma5", history[-1])
+        self.assertIn("pct_above_ma10", history[-1])
+
     def test_v2_02_future_truncation_keeps_historical_result_identical(self):
         self.assertEqual(self.result, self.bundle["prefix_result"])
 
@@ -387,6 +396,23 @@ class IndexMarketStructureV2Test(unittest.TestCase):
             {"industry", "amount_share", "amount_share_change_5d", "amount_share_change_20d", "amount_ratio_20d"}
             .issubset(rows[0])
         )
+
+    def test_v2_12c_industry_aggregation_is_shared_and_numeric(self):
+        cutoff = self.bundle["cutoff"]
+        frames = _build_industry_daily_frames(
+            close=self.bundle["close"].loc[:cutoff],
+            amount=self.bundle["amount"].loc[:cutoff],
+            industry_groups=self.bundle["industries"],
+        )
+        self.assertEqual(set(frames.industry_returns.columns), set(self.bundle["industries"]))
+        self.assertEqual(set(frames.industry_amounts.columns), set(self.bundle["industries"]))
+        self.assertTrue(all(pd.api.types.is_numeric_dtype(dtype) for dtype in frames.industry_returns.dtypes))
+        self.assertTrue(all(pd.api.types.is_numeric_dtype(dtype) for dtype in frames.industry_amounts.dtypes))
+        self.assertTrue(frames.industry_amount_ratios.iloc[19:].notna().any().any())
+
+    def test_v2_12d_panel_window_keeps_required_warmup(self):
+        self.assertGreaterEqual(V2_MIN_PANEL_HISTORY_ROWS, 816)
+        self.assertGreaterEqual(V2_MIN_PANEL_HISTORY_ROWS, 252)
 
     def test_v2_13_layered_breadth_uses_correct_effective_denominator(self):
         row = self._layer_row_for_test(

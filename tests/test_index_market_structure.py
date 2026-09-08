@@ -614,6 +614,12 @@ class IndexMarketStructureTest(unittest.TestCase):
             loaded = json.loads(paths["json"].read_text(encoding="utf-8"))
             self.assertEqual(loaded["date"], structure["date"])
             self.assertTrue(paths["breadth"].exists())
+            self.assertTrue(paths["layered_breadth_history"].exists())
+            layered_history = pd.read_csv(paths["layered_breadth_history"])
+            self.assertIn("layer", layered_history.columns)
+            self.assertIn("advance_ratio", layered_history.columns)
+            self.assertIn("pct_above_ma5", layered_history.columns)
+            self.assertIn("pct_above_ma10", layered_history.columns)
 
         dates = pd.date_range("2025-01-01", periods=40, freq="B").strftime("%Y-%m-%d")
         features = pd.DataFrame({"trade_date": dates, "close": np.arange(40) + 3000.0})

@@ -164,11 +164,14 @@ quant> stats pattern --pattern bottom_pattern_break --pool 人形机器人
 quant> stats pattern --pattern needle_bottom_raise
 quant> stats screen --preset trendline_pullback --pool 人形机器人,AI --pool-mode any --top 50
 quant> stats screen --preset trendline_pullback --pool 人形机器人 --save-pool --pool-name 趋势线回踩池
+quant> stats vpt --top 100 --min-score 70
 quant> stats rotation --model three_factor --hold-count 5 --rebalance-days 5
 quant> stats radar --top 300
 ```
 
 `stats screen` 第一版用于筛选“趋势向上、最近回踩趋势线、未有效跌破”的股票。它只读取本地 K 线缓存，支持 `--trade-date` 做历史截止日筛选，结果默认写到 `output.signals_dir/screen_signals_*.csv/html`；只有传 `--save-pool --pool-name ...` 才会更新股票池。
+
+`stats vpt` 只读取本地日 K，输出全部股票的当日 VPT 状态、候选榜和候选历史状态。可用 `--trade-date YYYYMMDD` 固定历史截止日，`--state`、`--min-score` 和 `--pool` 只过滤报告候选，不改变 VPT 计算公式。
 
 `stats radar` 生成强势股雷达、行业强度、当日 snapshot 和 T+5/T+10/T+20 后验审计，默认输出到 `output.statistics_dir/strong_stock_radar/` 与 `output.reports_dir/strong_stock_radar/strong_stock_radar.html`。该模块只做市场观察和复盘分类，不输出买卖建议。
 
@@ -243,6 +246,8 @@ quant> index forecast --symbol 000001.SH --horizon 5
 `index forecast` 会基于上证指数趋势、MACD/KDJ、成交金额、A/D 斜率、NH-NL 斜率和分层广度生成规则预测报告，输出到 `output.reports_dir/index_forecast/`。数据会拆成三张 CSV：`indicators_*.csv` 是纯指标宽表，`features_*.csv` 是追加未来标签后的训练/验证表，`predictions_*.csv` 是模型预测结果。
 
 `index structure-brief` 只读取已有 `output.statistics_dir/index_forecast/market_structure_{symbol}.json`、可用 `features_{symbol}.csv` 和本地指数/行业缓存，单独生成 `output.reports_dir/index_forecast/{symbol}_market_structure_brief.html`；它不生成完整九屏 HTML、不调用 LLM、不写归档。
+
+`index industry-market` 读取同一市场结构 JSON 及本地同花顺行业/概念缓存，重建 `output.reports_dir/industry/industry_market.html`。每日任务会在 `index forecast` 之后调用它，确保页面截止日与最新已完成交易日一致。
 预测报告里重点看“模型评估图表”和“模型评估明细”：分数分桶收益是否随分数提高而变好，bull/neutral/bear 分组的未来收益是否有明显差异，以及规则择时曲线是否优于买入持有。
 
 ## 7. 常用流水线

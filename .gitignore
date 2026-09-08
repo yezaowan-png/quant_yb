@@ -19,6 +19,10 @@ __pycache__/
 data/cache/
 input/
 output/
+output/trades/
+output/reports/
+output/signals/
+output/statistics/
 
 # 本地主题池状态与自动备份（含人工分类、证据和审计记录）
 config/theme_stock_pools.json

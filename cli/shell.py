@@ -1,6 +1,7 @@
 """交互式命令 REPL —— 直接输入命令而非逐级菜单"""
 
 import shlex
+import time
 from pathlib import Path
 
 import click
@@ -11,6 +12,7 @@ from cli.data_cli import run_daily_basic, run_data_audit, run_download, run_stoc
 from cli.dashboard_cli import run_dashboard
 from cli.etf_cli import run_etf_report
 from cli.index_cli import (
+    run_industry_market_report,
     run_index_download,
     run_index_forecast,
     run_index_forecast_diagnose,
@@ -20,6 +22,8 @@ from cli.index_cli import (
     run_index_overview,
     run_index_report,
     run_index_ths,
+    run_market_environment,
+    run_market_structure_brief,
 )
 from cli.stats_cli import run_limit_strength, run_support_resistance
 from cli.sector_money_flow_cli import (
@@ -74,7 +78,7 @@ def _print_help():
     click.echo("    示例: data-audit")
     click.echo()
     click.echo("  index           指数数据与每日概览")
-    click.echo("    子命令: download / report / overview / ths / market / members / forecast / structure / forecast-diagnose / llm-summary")
+    click.echo("    子命令: download / report / overview / ths / market / members / forecast / structure / structure-brief / environment / industry-market / forecast-diagnose / llm-summary")
     click.echo("    参数: --symbol (默认 000001.SH) --all --start --end --force --output")
     click.echo("    示例: index overview --symbol 000001.SH")
     click.echo("          index overview --all")
@@ -84,6 +88,9 @@ def _print_help():
     click.echo("          index members --all")
     click.echo("          index forecast --symbol 000001.SH --horizon 5")
     click.echo("          index structure --symbol 000001.SH --horizon 5  # forecast 的结构分析别名")
+    click.echo("          index structure-brief --symbol 000001.SH")
+    click.echo("          index environment --symbol 000001.SH")
+    click.echo("          index industry-market --symbol 000001.SH")
     click.echo("          index llm-summary --symbol 000001.SH --horizon 5")
     click.echo()
     click.echo("  etf             ETF 策略研究板块")
@@ -136,7 +143,7 @@ def _print_help():
     click.echo("    示例: compare --symbol 000001.SZ")
     click.echo()
     click.echo("  stats           数据统计分析")
-    click.echo("    子命令: analyze / compare / theme / rps / rps-track / pattern / screen / rotation / limit-board / limit-research / limit-strength / support-resistance")
+    click.echo("    子命令: analyze / compare / theme / rps / rps-track / stock-kline-pages / pattern / screen / vpt / rotation / limit-board / limit-research / limit-strength / support-resistance")
     click.echo("          pool-import / pool-export / pool-from-signals")
     click.echo("    参数: --strategy (analyze), --pool/--start (theme), --pattern, --symbol, --window")
     click.echo("    示例: stats analyze --strategy rsi")
@@ -279,6 +286,21 @@ def _cmd_index(config: dict, **kwargs):
         model = str(kwargs.get("model", "rule_v1") or "rule_v1")
         run_index_forecast(config, symbol, horizon, start, end, force, output, model)
         return
+    if sub in {"structure-brief", "structure_brief"}:
+        horizon = int(kwargs.get("horizon", 5) or 5)
+        model = str(kwargs.get("model", "rule_v1") or "rule_v1")
+        structure_json = kwargs.get("structure_json", kwargs.get("structure-json"))
+        full_report = kwargs.get("full_report", kwargs.get("full-report"))
+        run_market_structure_brief(config, symbol, horizon, model, output, structure_json, full_report)
+        return
+    if sub == "environment":
+        structure_json = kwargs.get("structure_json", kwargs.get("structure-json"))
+        run_market_environment(config, symbol, output, structure_json)
+        return
+    if sub in {"industry-market", "industry_market"}:
+        structure_json = kwargs.get("structure_json", kwargs.get("structure-json"))
+        run_industry_market_report(config, symbol, output, structure_json)
+        return
     if sub in {"forecast-diagnose", "forecast_diagnose", "diagnose"}:
         horizon = int(kwargs.get("horizon", 5) or 5)
         label_mode = str(kwargs.get("label_mode", kwargs.get("label-mode", "legacy")) or "legacy")
@@ -300,8 +322,8 @@ def _cmd_index(config: dict, **kwargs):
             skip_if_no_key=bool(kwargs.get("skip_if_no_key", kwargs.get("skip-if-no-key", False))),
         )
         return
-    if sub not in {"download", "report", "overview", "ths", "market", "members", "forecast", "structure", "forecast-diagnose", "forecast_diagnose", "diagnose", "llm-summary", "llm_summary", "summary"}:
-        click.secho("  用法: index download|report|overview|ths|market|members|forecast|structure|forecast-diagnose|llm-summary --symbol 000001.SH 或 --all", fg="yellow")
+    if sub not in {"download", "report", "overview", "ths", "market", "members", "forecast", "structure", "structure-brief", "structure_brief", "environment", "industry-market", "industry_market", "forecast-diagnose", "forecast_diagnose", "diagnose", "llm-summary", "llm_summary", "summary"}:
+        click.secho("  用法: index download|report|overview|ths|market|members|forecast|structure|structure-brief|environment|industry-market|forecast-diagnose|llm-summary --symbol 000001.SH 或 --all", fg="yellow")
 
 
 def _cmd_backtest(config: dict, **kwargs):
@@ -418,9 +440,12 @@ def _cmd_stats(config: dict, **kwargs):
         run_limit_up_research,
         run_pattern_scan,
         run_screen,
+        run_vpt_scan,
         run_rotation_analysis,
         run_rps_top,
         run_rps_track,
+        _print_stock_kline_page_sync,
+        sync_stock_kline_pages,
         run_strong_stock_radar,
         run_theme_analysis,
     )
@@ -489,6 +514,24 @@ def _cmd_stats(config: dict, **kwargs):
             symbol = ""
         window = int(kwargs.get("window", 120) or 120)
         run_rps_track(config, symbol=str(symbol).upper(), window=window)
+    elif sub in {"stock-kline-pages", "stock_kline_pages"}:
+        limit = kwargs.get("limit", 0)
+        bars = kwargs.get("bars", 0)
+        sync_kwargs = {
+            "force": bool(kwargs.get("force", False)),
+            "limit": 0 if isinstance(limit, bool) else int(limit or 0),
+            "bars": 0 if isinstance(bars, bool) else int(bars or 0),
+        }
+        symbol = kwargs.get("symbol")
+        if isinstance(symbol, str) and symbol.strip():
+            sync_kwargs["symbols"] = [item.strip().upper() for item in symbol.split(",") if item.strip()]
+        workers = kwargs.get("workers")
+        if not isinstance(workers, bool) and workers:
+            sync_kwargs["workers"] = int(workers)
+        result = sync_stock_kline_pages(config, **sync_kwargs)
+        _print_stock_kline_page_sync(result)
+        if bool(kwargs.get("strict", False)) and result["failed"]:
+            raise RuntimeError(f"个股 K 线页生成失败 {len(result['failed'])} 只")
     elif sub == "pattern":
         pattern = kwargs.get("pattern", "")
         if isinstance(pattern, bool):
@@ -537,6 +580,25 @@ def _cmd_stats(config: dict, **kwargs):
             save_pool=save_pool,
             pool_name=None if isinstance(pool_name, bool) else pool_name,
             merge_pool=merge_pool,
+        )
+    elif sub == "vpt":
+        pool = kwargs.get("pool")
+        if isinstance(pool, bool):
+            pool = None
+        pool_mode = kwargs.get("pool_mode", kwargs.get("pool-mode", "any"))
+        trade_date = kwargs.get("trade_date", kwargs.get("trade-date"))
+        if isinstance(trade_date, bool):
+            trade_date = None
+        run_vpt_scan(
+            config,
+            pool=pool,
+            pool_mode="any" if isinstance(pool_mode, bool) else str(pool_mode),
+            trade_date=None if trade_date is None else str(trade_date),
+            lookback=int(kwargs.get("lookback", 250) or 250),
+            top=int(kwargs.get("top", 100) or 100),
+            min_score=float(kwargs.get("min_score", kwargs.get("min-score", 0.0)) or 0.0),
+            state=str(kwargs.get("state", "ALL") or "ALL"),
+            history_days=int(kwargs.get("history_days", kwargs.get("history-days", 60)) or 60),
         )
     elif sub == "rotation":
         pool = kwargs.get("pool")
@@ -680,10 +742,10 @@ def _cmd_stats(config: dict, **kwargs):
             return
         click.secho(f"  扫描结果已写入股票池: {name} -> {path}", fg="green")
     else:
-        click.secho(
-            f'  未知子命令: "{sub}"。可用: analyze, compare, theme, rps, rps-track, pattern, screen, rotation, limit-board, limit-research, limit-strength, support-resistance, radar。'
-            "示例: stats rps --window 120 --top 50",
-            fg="red",
+        raise ValueError(
+            f'未知 stats 子命令: "{sub}"。可用: analyze, compare, theme, rps, rps-track, '
+            "stock-kline-pages, pattern, screen, vpt, rotation, limit-board, limit-research, "
+            "limit-strength, support-resistance, radar。示例: stats rps --window 120 --top 50"
         )
 
 
@@ -865,6 +927,7 @@ def _execute_pipeline(config: dict, commands_text: str) -> bool:
 
         click.echo()
         click.secho(f"── [{line_no}/{len(lines)}] $ {command_line}", fg="cyan")
+        started_at = time.perf_counter()
 
         try:
             if not _dispatch_command(config, parts):
@@ -881,6 +944,8 @@ def _execute_pipeline(config: dict, commands_text: str) -> bool:
                 click.secho(f"  流水线在第 {line_no} 条中止。", fg="red")
                 succeeded = False
                 break
+        finally:
+            click.echo(f"  耗时: {time.perf_counter() - started_at:.1f}s")
 
     click.echo()
     if succeeded:

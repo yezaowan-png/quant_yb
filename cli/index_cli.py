@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -16,6 +17,7 @@ import pandas as pd
 from analysis.market_breadth import (
     breadth_indicator_payload,
     build_market_breadth,
+    build_market_breadth_groups,
     load_latest_index_member_symbols,
     load_stock_basic_symbols_by_market,
 )
@@ -55,7 +57,9 @@ from analysis.market_environment_labels import (
 from cli.common import load_config as _load_config
 from data.downloader import DataDownloader, default_start, today_str
 from visual.index_forecast_report import generate_index_forecast_report
+from visual.industry_market_report import generate_industry_market_report
 from visual.market_structure_brief import generate_market_structure_brief
+from visual.market_environment import generate_market_environment
 from visual.components import relative_href
 from visual.index_report import generate_index_report
 from visual.market_report import generate_market_report
@@ -285,6 +289,10 @@ def _market_structure_alias_path(config: dict, symbol: str) -> Path:
 
 def _market_structure_brief_path(config: dict, symbol: str) -> Path:
     return Path(config["output"]["reports_dir"]) / "index_forecast" / f"{symbol.upper()}_market_structure_brief.html"
+
+
+def _market_environment_path(config: dict, symbol: str) -> Path:
+    return Path(config["output"]["reports_dir"]) / "index_forecast" / f"{symbol.upper()}_market_environment.html"
 
 
 def _market_structure_json_path(config: dict, symbol: str) -> Path:
@@ -860,18 +868,25 @@ def _build_breadth_groups_for_frames(
     start = min(dates).replace("-", "")
     end = max(dates).replace("-", "")
     groups = {"全A": breadth_indicator_payload(dates, all_a_breadth)}
+    member_groups: dict[str, set[str]] = {}
 
     for label, member_code in DEFAULT_MEMBER_INDEX_CODES.items():
         symbols = load_latest_index_member_symbols(meta_dir, member_code, as_of=end)
         if not symbols:
             continue
-        breadth = build_market_breadth(cache_dir, start=start, end=end, symbols=set(symbols))
-        groups[label] = breadth_indicator_payload(dates, breadth)
+        member_groups[label] = set(symbols)
 
     chinext_symbols = load_stock_basic_symbols_by_market(meta_dir, "创业板")
     if chinext_symbols:
-        breadth = build_market_breadth(cache_dir, start=start, end=end, symbols=set(chinext_symbols))
-        groups["创业板"] = breadth_indicator_payload(dates, breadth)
+        member_groups["创业板"] = set(chinext_symbols)
+
+    for label, breadth in build_market_breadth_groups(
+        cache_dir,
+        member_groups,
+        start=start,
+        end=end,
+    ).items():
+        groups[label] = breadth_indicator_payload(dates, breadth)
 
     return {
         label: payload
@@ -941,18 +956,42 @@ def run_index_ths(
     click.echo(f"日期范围: {start} ~ {end}")
     click.echo(f"同花顺指数数量: {len(symbols)}")
     results = []
-    for idx, symbol in enumerate(symbols, start=1):
-        name = names.get(symbol, symbol)
-        click.echo(f"\n[{idx}/{len(symbols)}] 同花顺指数: {symbol} ({name})")
-        try:
-            df = dl.download_index(symbol=symbol, start=start, end=end, force=force)
-        except Exception as exc:
-            if not skip_failures:
-                raise
-            click.secho(f"  警告: 跳过同花顺指数 {symbol} ({name}): {exc}", fg="yellow")
-            continue
-        click.echo(f"完成: {len(df)} 条，缓存文件: {dl._index_cache_path(symbol)}")
-        results.append((symbol, df))
+    workers = max(1, int((config.get("parallel") or {}).get("index_download_workers") or dl._max_workers))
+    if skip_failures and workers > 1:
+        click.echo(f"并行更新: {workers} 路；API 调用仍受账号统一限流器约束")
+        completed = 0
+        failures: list[tuple[str, Exception]] = []
+        frames: dict[str, pd.DataFrame] = {}
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = {
+                executor.submit(dl.download_index, symbol, start, end, force): symbol
+                for symbol in symbols
+            }
+            for future in as_completed(futures):
+                symbol = futures[future]
+                completed += 1
+                try:
+                    frames[symbol] = future.result()
+                except Exception as exc:
+                    failures.append((symbol, exc))
+                if completed % 50 == 0 or completed == len(symbols):
+                    click.echo(f"  同花顺指数进度: {completed}/{len(symbols)}，失败 {len(failures)}")
+        for symbol, exc in failures:
+            click.secho(f"  警告: 跳过同花顺指数 {symbol} ({names.get(symbol, symbol)}): {exc}", fg="yellow")
+        results = [(symbol, frames[symbol]) for symbol in symbols if symbol in frames]
+    else:
+        for idx, symbol in enumerate(symbols, start=1):
+            name = names.get(symbol, symbol)
+            click.echo(f"\n[{idx}/{len(symbols)}] 同花顺指数: {symbol} ({name})")
+            try:
+                df = dl.download_index(symbol=symbol, start=start, end=end, force=force)
+            except Exception as exc:
+                if not skip_failures:
+                    raise
+                click.secho(f"  警告: 跳过同花顺指数 {symbol} ({name}): {exc}", fg="yellow")
+                continue
+            click.echo(f"完成: {len(df)} 条，缓存文件: {dl._index_cache_path(symbol)}")
+            results.append((symbol, df))
     if not results:
         raise click.ClickException("没有可用同花顺指数数据")
     return results
@@ -1267,40 +1306,12 @@ def run_index_forecast(
     latest = predictions.iloc[-1].to_dict() if not predictions.empty else {}
     report_date = str(market_structure.get("date") or latest.get("trade_date") or end)
     llm_summary_links: dict[str, str] = {}
-    llm_summary_path: Path | None = None
-    # Resolve paths before the API call.  Fact/prompt files are written before
-    # DeepSeek is contacted and must remain available for archival on failures.
-    llm_paths = llm_summary_paths(config, symbol, horizon)
+    # LLM review is an explicit, manual `index llm-summary` action.  The daily
+    # market-structure pipeline must not make an external model call or depend
+    # on one for report generation and archival.
+    llm_paths = None
     llm_call_status = "not_called"
     llm_error_type: str | None = None
-    try:
-        llm_paths, llm_summary = write_llm_summary_artifacts(
-            config,
-            symbol=symbol,
-            horizon=horizon,
-            name=name,
-            call_api=True,
-            skip_if_no_key=True,
-        )
-        if llm_summary and llm_paths.html.exists():
-            llm_call_status = "succeeded"
-            llm_summary_path = llm_paths.summary
-            llm_summary_links["summary"] = relative_href(
-                out_path,
-                llm_paths.html,
-            )
-            llm_summary_links["facts"] = relative_href(
-                out_path,
-                llm_paths.facts,
-            )
-        else:
-            llm_call_status = "skipped_no_key"
-            click.echo(f"大模型事实包: {llm_paths.facts}")
-            click.echo("未检测到 DeepSeek API Key，已跳过复盘总结生成。")
-    except Exception as exc:
-        llm_call_status = "failed"
-        llm_error_type = type(exc).__name__
-        click.secho(f"大模型复盘总结生成失败，主报告继续生成: {exc}", fg="yellow")
     generate_index_forecast_report(
         features=features,
         predictions=predictions,
@@ -1360,8 +1371,6 @@ def run_index_forecast(
     click.echo(f"训练特征: {paths.features}")
     click.echo(f"预测数据: {paths.predictions}")
     click.echo(f"市场结构数据: {structure_paths['json']}")
-    if llm_summary_path:
-        click.echo(f"大模型复盘总结: {llm_summary_path}")
     click.echo(f"市场结构规范别名: {alias_path}")
     click.echo(f"市场结构摘录版: {brief_path}")
     if archived_paths:
@@ -1369,7 +1378,7 @@ def run_index_forecast(
         click.echo(
             f"市场结构归档目录: "
             f"{_market_structure_archive_dir(config, report_date, market_structure.get('schema_version'))}；"
-            f"策略=保留已有文件；LLM={llm_call_status}"
+            "策略=保留已有文件；LLM=手动触发"
         )
         if manifest_path:
             click.echo(f"市场结构归档清单: {manifest_path}")
@@ -1450,6 +1459,63 @@ def run_market_structure_brief(
     click.echo(f"市场结构事实层: {structure_path}")
     if feature_path.exists():
         click.echo(f"主指数特征: {feature_path}")
+    return generated
+
+
+def run_market_environment(
+    config: dict,
+    symbol: Optional[str] = None,
+    output: Optional[str] = None,
+    structure_json: Optional[str] = None,
+) -> Path:
+    """Generate a read-only conclusion/evidence page from saved market facts."""
+    symbol = (symbol or _default_symbol(config)).upper()
+    structure_path = Path(structure_json) if structure_json else _market_structure_json_path(config, symbol)
+    if not structure_path.exists():
+        raise click.ClickException(
+            f"市场结构 JSON 不存在: {structure_path}；请先运行 `python main.py index structure` 生成事实层，"
+            "或用 --structure-json 指定已有 JSON。"
+        )
+    try:
+        market_structure = json.loads(structure_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError) as exc:
+        raise click.ClickException(f"无法读取市场结构 JSON: {structure_path} ({exc})") from exc
+    generated = generate_market_environment(
+        market_structure,
+        Path(output) if output else _market_environment_path(config, symbol),
+        brief_path=_market_structure_brief_path(config, symbol),
+        full_report_path=_market_structure_alias_path(config, symbol),
+        name=_index_name(config, symbol),
+    )
+    click.echo(f"市场环境页: {generated}")
+    click.echo(f"市场结构事实层: {structure_path}")
+    return generated
+
+
+def run_industry_market_report(
+    config: dict,
+    symbol: Optional[str] = None,
+    output: Optional[str] = None,
+    structure_json: Optional[str] = None,
+) -> Path:
+    """Regenerate the industry/concept market page from saved facts and caches."""
+    symbol = (symbol or _default_symbol(config)).upper()
+    structure_path = Path(structure_json) if structure_json else _market_structure_json_path(config, symbol)
+    if not structure_path.exists():
+        raise click.ClickException(
+            f"市场结构 JSON 不存在: {structure_path}；请先运行 `python main.py index structure` 生成事实层，"
+            "或用 --structure-json 指定已有 JSON。"
+        )
+    try:
+        market_structure = json.loads(structure_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError) as exc:
+        raise click.ClickException(f"无法读取市场结构 JSON: {structure_path} ({exc})") from exc
+
+    reports_dir = Path((config.get("output") or {}).get("reports_dir", "output/reports"))
+    output_path = Path(output) if output else reports_dir / "industry" / "industry_market.html"
+    generated = generate_industry_market_report(config, market_structure, output_path)
+    click.echo(f"行业行情页: {generated}")
+    click.echo(f"市场结构事实层: {structure_path}")
     return generated
 
 
@@ -1799,6 +1865,24 @@ def structure_brief(
     """只生成市场结构摘录页，不生成完整九屏报告。"""
     config = _load_config()
     run_market_structure_brief(config, symbol, horizon, model, output, structure_json, full_report)
+
+
+@index_group.command(name="environment")
+@click.option("--symbol", default=None, help="指数代码，默认读取 index_overview.default_symbol")
+@click.option("--output", default=None, help="输出 HTML 路径，默认 output/reports/index_forecast/{symbol}_market_environment.html")
+@click.option("--structure-json", default=None, help="已有市场结构 JSON 路径，默认读取 output/statistics/index_forecast/market_structure_{symbol}.json")
+def environment(symbol: Optional[str], output: Optional[str], structure_json: Optional[str]):
+    """从已有市场结构 JSON 生成只读市场环境摘要页。"""
+    run_market_environment(_load_config(), symbol, output, structure_json)
+
+
+@index_group.command(name="industry-market")
+@click.option("--symbol", default=None, help="指数代码，默认读取 index_overview.default_symbol")
+@click.option("--output", default=None, help="输出 HTML 路径，默认 output/reports/industry/industry_market.html")
+@click.option("--structure-json", default=None, help="已有市场结构 JSON 路径，默认读取 output/statistics/index_forecast/market_structure_{symbol}.json")
+def industry_market(symbol: Optional[str], output: Optional[str], structure_json: Optional[str]):
+    """从已有市场结构 JSON 和本地板块缓存重建行业行情页。"""
+    run_industry_market_report(_load_config(), symbol, output, structure_json)
 
 
 @index_group.command(name="forecast-diagnose")

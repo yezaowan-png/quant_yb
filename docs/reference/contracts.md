@@ -63,6 +63,7 @@ REPL 中的短命令必须与直接命令保持相同业务行为。
 - 个股 RPS 轨迹：`output.statistics_dir/rps_track_{symbol}_{window}.csv` 和同名 `.html`。
 - 形态扫描：`output.signals_dir/pattern_signals_{pattern}_{date}.csv` 和同名 `.html`。
 - 通用选股筛选：`output.signals_dir/screen_signals_{preset}[_pool]_{date}.csv` 和同名 `.html`。
+- VPT-01：`stats vpt` 输出 `output.signals_dir/vpt_candidates_{date}.csv`、`output.statistics_dir/vpt/vpt_snapshot_{date}.csv`、`output.statistics_dir/vpt/vpt_history_{date}.csv` 与 `output.reports_dir/vpt/vpt_candidates.html`。它是只读本地行情的研究筛选器，不写股票池、交易信号、仓位或订单。
 - 轮动研究：`output.statistics_dir/rotation_{model}_{pool}_{start}_{end}_nav.csv`、`*_holdings.csv` 和同名 `.html`。
 - 涨跌停看板：`output.statistics_dir/limit_board_{date}.csv`、`*_industry.csv`、`*_concepts.csv` 和同名 `.html`。
 - 半年涨停研究：`output.statistics_dir/limit_up_research_{start}_{end}_detail.csv`、`*_stocks.csv`、`*_themes.csv`、`*_fundamentals.csv`，研究文档保存到 `docs/research/limit_up_research_{start}_{end}.md`，细分股票池写入 `stock_pool.path` 的 `半年涨停_*_{start}_{end}`。
@@ -77,9 +78,10 @@ REPL 中的短命令必须与直接命令保持相同业务行为。
 - 市场环境预测：`output.statistics_dir/index_forecast/predictions_{symbol}_h{horizon}.csv`。
 - 极端风险研究：`output.statistics_dir/market_risk_gate/{symbol}/`，每个实验保存到独立的 `experiments/{experiment}/` 子目录。
 - 极端风险报告：`output.reports_dir/market_risk_gate/{symbol}_{experiment}_risk_gate.html`；矩阵汇总为 `{symbol}_risk_gate.html`。
-- 总面板：`output.reports_dir/dashboard.html`，展示市场状态、信号流、指数、题材、ETF、策略和最近单标的报告入口，并提供市场结构摘录版导航。
+- 产品导航壳：`output.reports_dir/dashboard.html`，展示今日总览、数据中心、市场环境、行情中心、强势方向、策略选股与备用研究入口；仅链接已生成的本地报告，不触发数据或报告生成。旧聚合总面板由 `dashboard --legacy` 输出至 `output.reports_dir/legacy_dashboard.html`。
 - 数据质量报告：`output.reports_dir/data_quality.html`；机器可读摘要和问题明细分别为 `output.statistics_dir/data_quality/market_data_audit.json`、`market_data_issues.csv`。默认快速模式只证明全部文件的字段和末尾记录通过检查，完整历史逐行检查必须显式使用 `--deep`。
 - 市场结构摘录版：`output.reports_dir/index_forecast/{symbol}_market_structure_brief.html`，从市场结构 JSON 事实层和本地指数/行业缓存生成第 2-5 屏：指数趋势与技术结构、分层市场广度、横截面收益分布、风格轮动/领涨质量/行业结构；可通过 `python main.py index structure-brief` 单独生成，不要求完整九屏 HTML 已存在；只作解释展示，不参与策略、仓位或订单。
+- 市场环境页：`output.reports_dir/index_forecast/{symbol}_market_environment.html`，只读取已有市场结构 JSON，按“结论 → 关键证据 → 详细研究”展示，不计算或改变任何市场结构字段；通过 `python main.py index environment` 显式生成。
 - 行业行情页：`output.reports_dir/industry/industry_market.html`，从市场结构 JSON 事实层和本地同花顺行业指数缓存生成全行业强弱表、可点击表头排序，并提供行业指数 K 线入口；右侧成分股优先读取 `data.meta_dir/ths_members/{行业指数}.csv` 的 Tushare `ths_member` 官方同花顺成分，缺失时再用 `dashboard.stock_selector.csv_path` 股票池行业标签近似匹配，价格和日涨跌幅优先使用本地日线缓存计算；由 dashboard 自动生成，只作解释展示，不参与策略、仓位或订单。
 
 ## 交易流水字段

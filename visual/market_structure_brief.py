@@ -45,6 +45,27 @@ _BRIEF_CSS = """
 .brief-shell .panel-head {
   padding: 18px 22px;
 }
+.brief-section > summary.panel-head {
+  align-items: center;
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+.brief-section > summary.panel-head::-webkit-details-marker {
+  display: none;
+}
+.brief-section > summary.panel-head h2::before {
+  content: "−";
+  display: inline-block;
+  width: 20px;
+  color: #2468d8;
+}
+.brief-section:not([open]) > summary.panel-head h2::before {
+  content: "+";
+}
+.brief-section > .brief-section-content {
+  overflow: hidden;
+}
 .brief-shell .chart {
   height: min(62vh, 680px);
   min-height: 500px;
@@ -500,7 +521,7 @@ def generate_market_structure_brief(
     technical_industry_frames: dict[str, pd.DataFrame] | None = None,
     technical_structure_config: dict[str, Any] | None = None,
 ) -> Path:
-    """Generate screens 2-5 from saved v2 market-structure facts and local caches."""
+    """Generate a collapsible excerpt from saved v2 market-structure facts and local caches."""
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
     primary_symbol = str(symbol or _primary_symbol(structure)).upper()
@@ -529,6 +550,15 @@ def generate_market_structure_brief(
     forecast_chart = primary_technical_timeframes.get("1d") or {}
 
     structure_state = structure.get("market_structure") or {}
+    breadth_history_path = (
+        Path(config.get("output", {}).get("statistics_dir", "output/statistics"))
+        / "index_forecast"
+        / f"market_structure_layered_breadth_history_{primary_symbol}.csv"
+    )
+    breadth_history_link = (
+        f"<a href='{escape(relative_href(output, breadth_history_path), quote=True)}' download>导出最近6个月 CSV</a>"
+        if breadth_history_path.exists() else ""
+    )
     full_link = (
         f"<a class='primary' href='{escape(relative_href(output, full_report_path), quote=True)}'>完整市场结构报告</a>"
         if full_report_path else ""
@@ -538,14 +568,15 @@ def generate_market_structure_brief(
       <header class="topbar">
         <div>
           <h1>{escape(name)}市场结构摘录</h1>
-          <div class="sub">{escape(primary_symbol)} · 市场结构第 2-5 屏摘录 · 数据截至 {escape(str(structure.get('date', '--')))} · 不参与策略、仓位或订单。</div>
+          <div class="sub">{escape(primary_symbol)} · 市场结构摘要 · 数据截至 {escape(str(structure.get('date', '--')))} · 不参与策略、仓位或订单。</div>
           <div class="top-actions"><a href="../dashboard.html">返回 Dashboard</a>{full_link}</div>
         </div>
         <div class="badge neutral">{escape(str(structure_state.get('style_regime_name') or '结构摘录'))}</div>
       </header>
 
-      <section class="panel" data-screen="2">
-        <div class="panel-head"><h2><span class="screen-kicker">第2屏</span>指数趋势与技术结构</h2><span>日/周趋势、K线、技术指标与归一化相对强度</span></div>
+      <details class="panel brief-section" data-section="index-technical" open>
+        <summary class="panel-head"><h2>指数趋势与技术结构</h2><span>日/周趋势、K线、技术指标与归一化相对强度</span></summary>
+        <div class="brief-section-content">
         <details class="brief-collapsible index-overview-details">
           <summary><span><strong>主要指数概览</strong><small>默认折叠；展开后可用滚轮下拉、横向滚动查看完整字段</small></span><em>{len(structure.get('indices') or {})} 个指数</em></summary>
           <div class="v2-table-wrap brief-scroll-table"><table>
@@ -553,7 +584,7 @@ def generate_market_structure_brief(
             <tbody>{_index_structure_rows(structure)}</tbody>
           </table></div>
         </details>
-        <div class="subpanel-title"><strong>指数K线与手动画线</strong><span>K线、成交量、成交额、三市总成交额与量额比同图；指数使用不复权点位</span></div>
+        <div class="subpanel-title"><strong>指数K线与手动画线</strong><span>K线、成交量、成交额、量额比、三市总额及其 5/20 日均额同图；指数使用不复权点位</span></div>
         <div class="forecast-kline-toolbar">
           <div class="kline-tools">
             <strong>指数</strong>
@@ -573,7 +604,7 @@ def generate_market_structure_brief(
             <span id="forecast-manual-status" class="forecast-manual-status">选择工具后在指数 K 线图点击画线；画完可拖动圆点调整。</span>
           </div>
         </div>
-        <div class="forecast-integrated-note">主图下方依次显示指数成交量、指数成交额、指数量额比和三市总成交额，红色代表上涨日、绿色代表下跌日；自动结构线显示已关闭，支撑/阻力/趋势线均由你手动绘制并保存在浏览器本地。</div>
+        <div class="forecast-integrated-note">主图下方依次显示指数成交量、指数成交额、指数量额比和三市总成交额；三市总额柱状图叠加 5 日、20 日均额线，红色代表上涨日、绿色代表下跌日；自动结构线显示已关闭，支撑/阻力/趋势线均由你手动绘制并保存在浏览器本地。</div>
         <div id="forecast-kline" class="chart"></div>
         <div class="kline-subchart-head"><div class="indicator-switches"><strong>副图</strong><button type="button" class="indicator-switch-btn" data-indicator="kdj" onclick="switchForecastIndicator('kdj')">KDJ</button><button type="button" class="indicator-switch-btn" data-indicator="macd" onclick="switchForecastIndicator('macd')">MACD</button></div><span>成交量/成交额已在主图内；KDJ/MACD 可按需展开</span></div>
         <div id="forecast-index-indicator" class="chart index-indicator"></div>
@@ -581,10 +612,12 @@ def generate_market_structure_brief(
         <div class="index-compare-tools"><strong>比较区间</strong><button type="button" class="index-compare-window" data-window="20" onclick="switchIndexCompareWindow(20)">20日</button><button type="button" class="index-compare-window" data-window="60" onclick="switchIndexCompareWindow(60)">60日</button><button type="button" class="index-compare-window active" data-window="120" onclick="switchIndexCompareWindow(120)">120日</button><button type="button" class="index-compare-window" data-window="250" onclick="switchIndexCompareWindow(250)">250日</button><span>包含上证、沪深300、中证500/1000/2000、创业板、科创50和平均股价</span></div>
         <div id="structure-index-compare" class="chart"></div>
         <div id="structure-index-ranking" class="index-strength-ranking"></div>
-      </section>
+        </div>
+      </details>
 
-      <section class="panel" data-screen="3">
-        <div class="panel-head"><h2><span class="screen-kicker">第3屏</span>分层市场广度</h2><span>统一展示全A与主要宽基的参与度、均线覆盖和A/D</span></div>
+      <details class="panel brief-section" data-section="layered-breadth" open>
+        <summary class="panel-head"><h2>分层市场广度</h2><span>最近6个月：全A与主要宽基的参与度、均线覆盖和A/D</span></summary>
+        <div class="brief-section-content">
         <details class="brief-collapsible layered-breadth-details">
           <summary><span><strong>分层市场广度概览</strong><small>默认折叠；展开后可用滚轮下滑、横向滚动查看完整字段</small></span><em>{len(structure.get('layered_breadth') or {})} 个层级</em></summary>
           <div class="v2-table-wrap brief-scroll-table"><table>
@@ -596,7 +629,7 @@ def generate_market_structure_brief(
           <button type="button" class="layered-breadth-switch active" data-metric="advance_ratio" onclick="switchLayeredBreadthMetric('advance_ratio')">上涨比例</button>
           <button type="button" class="layered-breadth-switch" data-metric="pct_above_ma5" onclick="switchLayeredBreadthMetric('pct_above_ma5')">MA5</button><button type="button" class="layered-breadth-switch" data-metric="pct_above_ma10" onclick="switchLayeredBreadthMetric('pct_above_ma10')">MA10</button><button type="button" class="layered-breadth-switch" data-metric="pct_above_ma20" onclick="switchLayeredBreadthMetric('pct_above_ma20')">MA20</button><button type="button" class="layered-breadth-switch" data-metric="pct_above_ma60" onclick="switchLayeredBreadthMetric('pct_above_ma60')">MA60</button>
           <button type="button" class="layered-breadth-switch" data-metric="new_high_5_ratio" onclick="switchLayeredBreadthMetric('new_high_5_ratio')">5日新高</button><button type="button" class="layered-breadth-switch" data-metric="new_low_5_ratio" onclick="switchLayeredBreadthMetric('new_low_5_ratio')">5日新低</button><button type="button" class="layered-breadth-switch" data-metric="new_high_10_ratio" onclick="switchLayeredBreadthMetric('new_high_10_ratio')">10日新高</button><button type="button" class="layered-breadth-switch" data-metric="new_low_10_ratio" onclick="switchLayeredBreadthMetric('new_low_10_ratio')">10日新低</button><button type="button" class="layered-breadth-switch" data-metric="new_high_20_ratio" onclick="switchLayeredBreadthMetric('new_high_20_ratio')">20日新高</button><button type="button" class="layered-breadth-switch" data-metric="new_low_20_ratio" onclick="switchLayeredBreadthMetric('new_low_20_ratio')">20日新低</button><button type="button" class="layered-breadth-switch" data-metric="new_high_60_ratio" onclick="switchLayeredBreadthMetric('new_high_60_ratio')">60日新高</button><button type="button" class="layered-breadth-switch" data-metric="new_low_60_ratio" onclick="switchLayeredBreadthMetric('new_low_60_ratio')">60日新低</button>
-          <span>新高/新低基准均排除当日</span>
+          <span>最近6个月；新高/新低基准均排除当日</span>{breadth_history_link}
         </div>
         <div id="structure-layered-breadth" class="chart layered-chart"></div>
         <div class="subpanel-title"><strong>横截面收益分布</strong><span>当日直方图与最近20个交易日 Q10/中位数/Q90；不是未来收益分布</span></div>
@@ -611,16 +644,19 @@ def generate_market_structure_brief(
             <div id="structure-distribution-quantiles" class="chart distribution-quantile-chart"></div>
           </div>
         </div>
-      </section>
+        </div>
+      </details>
 
-      <section class="panel" data-screen="5">
-        <div class="panel-head"><h2><span class="screen-kicker">第5屏</span>风格轮动、领涨质量与行业结构</h2><span>当前横向强弱，不表示未来收益概率</span></div>
+      <details class="panel brief-section" data-section="style-and-structure" open>
+        <summary class="panel-head"><h2>风格轮动、领涨质量与行业结构</h2><span>当前横向强弱，不表示未来收益概率</span></summary>
+        <div class="brief-section-content">
         {_leadership_callout(structure)}
         {_brief_index_lift_panel(structure)}
         {_brief_amount_structure_panel(structure)}
         <div class="subpanel-title"><strong>风格轮动状态</strong><span>强度水位、5日变化、20日相对斜率与领涨持续时间</span></div>
         <div class="v2-table-wrap compact"><table><thead><tr><th>风格</th><th>当前强度</th><th>5日变化</th><th>20日相对强弱</th><th>领涨天数</th><th>领涨质量</th><th>当前状态</th></tr></thead><tbody>{_style_rotation_rows(structure)}</tbody></table></div>
-      </section>
+        </div>
+      </details>
     </main>
     """
     html = html_document(
@@ -638,6 +674,12 @@ def generate_market_structure_brief(
                 f"window._TECHNICAL_KLINES={to_compact_json(primary_technical_timeframes)};"
             )
             + _JS_V11
+            + inline_script(
+                "document.addEventListener('toggle',function(event){"
+                "if(event.target.classList&&event.target.classList.contains('brief-section')&&event.target.open){"
+                "window.dispatchEvent(new Event('resize'));"
+                "}},true);"
+            )
         ),
     )
     output.write_text(html, encoding="utf-8")

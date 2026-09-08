@@ -5,7 +5,12 @@ from pathlib import Path
 import pandas as pd
 
 from analysis.index_market import build_market_overview
-from analysis.market_breadth import build_market_breadth, breadth_for_payload, breadth_indicator_payload
+from analysis.market_breadth import (
+    breadth_for_payload,
+    breadth_indicator_payload,
+    build_market_breadth,
+    build_market_breadth_groups,
+)
 from visual.index_report import generate_index_report
 from visual.market_report import generate_market_report
 
@@ -60,6 +65,31 @@ class IndexMarketTest(unittest.TestCase):
                 breadth_for_payload(["2026-01-02", "2026-01-06"], breadth),
                 [{"up": 1, "down": 1, "flat": 0}, None],
             )
+
+    def test_build_market_breadth_groups_reuses_one_scan_with_overlapping_members(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_dir = Path(tmp)
+            for symbol, closes in {
+                "000001.SZ": [10, 11, 11],
+                "000002.SZ": [20, 19, 20],
+                "000003.SZ": [30, 30, 29],
+            }.items():
+                pd.DataFrame(
+                    {
+                        "date": ["20260101", "20260102", "20260105"],
+                        "close": closes,
+                    }
+                ).to_csv(cache_dir / f"{symbol}.csv", index=False)
+            groups = {
+                "组甲": {"000001.SZ", "000002.SZ"},
+                "组乙": {"000002.SZ", "000003.SZ"},
+            }
+            actual = build_market_breadth_groups(cache_dir, groups, nhnl_lookback=3)
+            expected = {
+                name: build_market_breadth(cache_dir, symbols=symbols, nhnl_lookback=3)
+                for name, symbols in groups.items()
+            }
+            self.assertEqual(actual, expected)
 
     def test_market_overview_and_report_include_index_rows(self):
         with tempfile.TemporaryDirectory() as tmp:

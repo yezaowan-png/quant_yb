@@ -4,32 +4,7 @@ set -euo pipefail
 PROJECT_DIR="/Users/caleb/projects/quant_prj/quant_yb"
 PYTHON="/Users/caleb/miniforge3/envs/quant_yb/bin/python"
 LOG_DIR="$PROJECT_DIR/output/logs"
-REVIEW_TEMPLATE="${REVIEW_TEMPLATE:-/Users/caleb/projects/note/笔记/模版/A股每日复盘模版.md}"
-REVIEW_OUTPUT_DIR="${REVIEW_OUTPUT_DIR:-/Users/caleb/projects/note/笔记/A股每日复盘}"
 mkdir -p "$LOG_DIR"
-
-TODAY="$("$PYTHON" - <<'PY'
-from datetime import datetime
-from zoneinfo import ZoneInfo
-print(datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y%m%d"))
-PY
-)"
-
-THEME_START="$("$PYTHON" - <<'PY'
-from datetime import datetime, timedelta
-from zoneinfo import ZoneInfo
-print((datetime.now(ZoneInfo("Asia/Shanghai")) - timedelta(days=60)).strftime("%Y%m%d"))
-PY
-)"
-
-MEMBER_START="$("$PYTHON" - <<'PY'
-from datetime import datetime, timedelta
-from zoneinfo import ZoneInfo
-# 60个交易日通常超过80个自然日；保留180天可覆盖节假日和低频成分快照。
-print((datetime.now(ZoneInfo("Asia/Shanghai")) - timedelta(days=180)).strftime("%Y%m%d"))
-PY
-)"
-
 cd "$PROJECT_DIR"
 
 if [[ -f "$PROJECT_DIR/.env.local" ]]; then
@@ -39,52 +14,83 @@ if [[ -f "$PROJECT_DIR/.env.local" ]]; then
   set +a
 fi
 
-PIPELINE="download --start 20110101 --end ${TODAY}; \
-daily-basic --start ${TODAY} --end ${TODAY}; \
-index ths --start 20110101 --end ${TODAY} --refresh-list --include-concepts --skip-failures; \
-index overview --all --start 20110101 --end ${TODAY}; \
-index members --all --start ${MEMBER_START} --end ${TODAY}; \
-index market --start 20110101 --end ${TODAY}; \
-index forecast --symbol 000001.SH --horizon 5 --start 20110101 --end ${TODAY}; \
-stats rps --window 120 --top 80; \
-stats pattern --pattern main_rise_wave; \
-stats pattern --pattern bottom_pattern_break; \
-stats pattern --pattern needle_bottom_raise; \
-stats screen --preset trendline_pullback --pool 人形机器人,AI --pool-mode any --top 80; \
-stats theme --pool 人形机器人 --start ${THEME_START} --end ${TODAY}; \
-stats theme --pool AI --start ${THEME_START} --end ${TODAY}; \
-stats theme --pool 创新药 --start ${THEME_START} --end ${TODAY}; \
+TODAY="$("$PYTHON" - <<'PY'
+from datetime import datetime
+from zoneinfo import ZoneInfo
+print(datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y%m%d"))
+PY
+)"
+
+AS_OF="${QUANT_YB_AS_OF_DATE:-$("$PYTHON" - <<'PY'
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+from cli.common import load_config
+from data.downloader import DataDownloader
+
+now = datetime.now(ZoneInfo("Asia/Shanghai"))
+calendar_end = now if now.hour >= 18 else now - timedelta(days=1)
+end = calendar_end.strftime("%Y%m%d")
+start = (calendar_end - timedelta(days=20)).strftime("%Y%m%d")
+dates = DataDownloader(load_config())._trade_dates(start, end)
+if not dates:
+    raise SystemExit("无法确定最近已完成交易日")
+print(dates[-1])
+PY
+)}"
+
+DATA_START="$(AS_OF_DATE="$AS_OF" "$PYTHON" - <<'PY'
+from datetime import datetime, timedelta
+import os
+as_of = datetime.strptime(os.environ["AS_OF_DATE"], "%Y%m%d")
+print((as_of - timedelta(days=45)).strftime("%Y%m%d"))
+PY
+)"
+
+MEMBER_START="$(AS_OF_DATE="$AS_OF" "$PYTHON" - <<'PY'
+from datetime import datetime, timedelta
+import os
+as_of = datetime.strptime(os.environ["AS_OF_DATE"], "%Y%m%d")
+print((as_of - timedelta(days=180)).strftime("%Y%m%d"))
+PY
+)"
+
+echo "每日数据目标交易日: ${AS_OF}（运行日 ${TODAY}）" | tee "$LOG_DIR/daily_${TODAY}.log"
+
+if [[ "${QUANT_YB_FORCE_DAILY:-0}" != "1" ]] && \
+  "$PYTHON" scripts/verify_daily_market_data.py \
+    --strict \
+    --expected-date "$AS_OF" \
+    --max-lag-calendar-days 4 >> "$LOG_DIR/daily_${TODAY}.log" 2>&1; then
+  echo "目标交易日 ${AS_OF} 的基础行情和核心报告均已完成，跳过重复更新。" | tee -a "$LOG_DIR/daily_${TODAY}.log"
+  exit 0
+fi
+
+PIPELINE="download --start ${DATA_START} --end ${AS_OF}; \
+daily-basic --start ${DATA_START} --end ${AS_OF}; \
+stats stock-kline-pages --workers 5 --strict; \
+index ths --start ${DATA_START} --end ${AS_OF} --include-concepts --skip-failures; \
+index download --symbol 399001.SZ --start ${DATA_START} --end ${AS_OF}; \
+index download --symbol 399006.SZ --start ${DATA_START} --end ${AS_OF}; \
+index download --symbol 000688.SH --start ${DATA_START} --end ${AS_OF}; \
+index download --symbol 000300.SH --start ${DATA_START} --end ${AS_OF}; \
+index download --symbol 000016.SH --start ${DATA_START} --end ${AS_OF}; \
+index download --symbol 000905.SH --start ${DATA_START} --end ${AS_OF}; \
+index download --symbol 000852.SH --start ${DATA_START} --end ${AS_OF}; \
+index download --symbol 932000.CSI --start ${DATA_START} --end ${AS_OF}; \
+index members --all --start ${MEMBER_START} --end ${AS_OF}; \
+index forecast --symbol 000001.SH --horizon 5 --start 20110101 --end ${AS_OF}; \
+index structure-brief --symbol 000001.SH --horizon 5; \
+index industry-market --symbol 000001.SH; \
 stats radar --top 300; \
+stats vpt --trade-date ${AS_OF} --top 100; \
 data-audit; \
 dashboard"
 
-printf "y\ny\n" | "$PYTHON" main.py run "$PIPELINE" 2>&1 | tee "$LOG_DIR/daily_${TODAY}.log"
-"$PYTHON" main.py stats limit-up-candidates --as-of-date "$TODAY" 2>&1 | tee -a "$LOG_DIR/daily_${TODAY}.log"
-LIMIT_CANDIDATES="$($PYTHON - <<'PY'
-from pathlib import Path
-from project_config import load_project_config
-config = load_project_config()
-print(Path(config["output"].get("statistics_dir", "output/statistics")) / "limit_up_candidates_latest.csv")
-PY
-)"
-LIMIT_AS_OF="$($PYTHON - <<'PY'
-import json
-from pathlib import Path
-from project_config import load_project_config
-config = load_project_config()
-path = Path(config["output"].get("statistics_dir", "output/statistics")) / "limit_up_candidates_status.json"
-print(json.loads(path.read_text(encoding="utf-8"))["as_of_date"])
-PY
-)"
-"$PYTHON" main.py stats theme-pool batch \
-  --candidates "$LIMIT_CANDIDATES" --as-of-date "$LIMIT_AS_OF" \
-  --output-dir "$(dirname "$LIMIT_CANDIDATES")/theme_classification_batches" 2>&1 | tee -a "$LOG_DIR/daily_${TODAY}.log"
+printf "y\ny\n" | "$PYTHON" main.py run "$PIPELINE" 2>&1 | tee -a "$LOG_DIR/daily_${TODAY}.log"
 "$PYTHON" scripts/verify_daily_market_structure.py \
   --symbol 000001.SH \
   --horizon 5 2>&1 | tee -a "$LOG_DIR/daily_${TODAY}.log"
 "$PYTHON" scripts/verify_daily_market_data.py \
   --strict \
+  --expected-date "$AS_OF" \
   --max-lag-calendar-days 4 2>&1 | tee -a "$LOG_DIR/daily_${TODAY}.log"
-"$PYTHON" main.py review daily \
-  --template "$REVIEW_TEMPLATE" \
-  --output-dir "$REVIEW_OUTPUT_DIR" 2>&1 | tee -a "$LOG_DIR/daily_${TODAY}.log"

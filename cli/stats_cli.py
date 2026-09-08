@@ -2,6 +2,7 @@
 
 import json
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date
 from pathlib import Path
 from typing import Optional
@@ -34,6 +35,7 @@ from analysis.limit_up_candidate_pool import (
 from analysis.strong_stock_radar import load_stock_metadata, save_strong_stock_radar
 from analysis.custom_concept_pools import ConceptPoolConfigError, validate_custom_concept_pools
 from analysis.support_resistance import save_support_resistance_analysis
+from analysis.vpt import VPT_CANDIDATE_STATES, VPT_STATES, save_vpt_scan
 from analysis.theme_stock_pools import (
     ThemeStockPoolError,
     add_pending_assignment,
@@ -181,33 +183,60 @@ def run_rps_top(
     return result
 
 
-def _ensure_stock_trendline_reports(config: dict, symbols: list[object], bars: int = 0) -> None:
-    """Generate fresh canonical stock K-line pages for linked static statistics reports."""
+def sync_stock_kline_pages(
+    config: dict,
+    symbols: list[object] | None = None,
+    bars: int = 0,
+    force: bool = False,
+    limit: int = 0,
+    workers: int | None = None,
+) -> dict[str, object]:
+    """Incrementally refresh canonical stock K-line pages from local CSV caches."""
     from visual.dashboard import generate_stock_kline_page
 
     reports_dir = Path(config.get("output", {}).get("reports_dir", "output/reports"))
     cache_dir = Path(config.get("data", {}).get("cache_dir", "data/cache"))
     report_template = Path(__file__).resolve().parent.parent / "visual" / "dashboard.py"
     report_template_mtime = report_template.stat().st_mtime if report_template.exists() else 0
+    meta_dir = Path(config.get("data", {}).get("meta_dir") or (cache_dir.parent / "meta"))
+    metadata_paths = [meta_dir / "stocks.csv", meta_dir / "stock_names.csv"]
+    configured_workers = (config.get("parallel") or {}).get("stock_kline_page_workers", 1)
+    try:
+        worker_count = max(1, int(workers if workers is not None else configured_workers))
+    except (TypeError, ValueError):
+        worker_count = 1
     generated = 0
     skipped = 0
     failed: list[tuple[str, str]] = []
     seen: set[str] = set()
+    targets: list[str] = []
 
-    for raw_symbol in symbols:
+    raw_symbols = symbols if symbols is not None else [path.stem for path in sorted(cache_dir.glob("*.csv"))]
+    for raw_symbol in raw_symbols:
         symbol = str(raw_symbol or "").strip().upper()
         if not symbol or symbol in seen:
             continue
+        if limit and len(seen) >= limit:
+            break
         seen.add(symbol)
         output_path = reports_dir / "stock_kline" / f"{symbol}.html"
         cache_path = cache_dir / f"{symbol}.csv"
+        source_mtimes = [report_template_mtime]
+        if cache_path.exists():
+            source_mtimes.append(cache_path.stat().st_mtime)
+        for metadata_path in [*metadata_paths, meta_dir / "daily_basic" / f"{symbol}.csv"]:
+            if metadata_path.exists():
+                source_mtimes.append(metadata_path.stat().st_mtime)
         if (
-            output_path.exists()
-            and (not cache_path.exists() or output_path.stat().st_mtime >= cache_path.stat().st_mtime)
-            and output_path.stat().st_mtime >= report_template_mtime
+            not force
+            and output_path.exists()
+            and output_path.stat().st_mtime >= max(source_mtimes)
         ):
             skipped += 1
             continue
+        targets.append(symbol)
+
+    def generate(symbol: str) -> tuple[str, str | None]:
         try:
             generate_stock_kline_page(
                 config,
@@ -216,13 +245,44 @@ def _ensure_stock_trendline_reports(config: dict, symbols: list[object], bars: i
                 back_href="../dashboard.html",
                 back_label="返回 Dashboard",
             )
-            generated += 1
         except Exception as exc:  # noqa: BLE001 - continue generating other stock pages.
-            failed.append((symbol, str(exc)))
+            return symbol, str(exc)
+        return symbol, None
 
-    click.echo(f"个股 K 线页: 生成/刷新 {generated}，已是最新 {skipped}，失败 {len(failed)}")
+    if worker_count == 1 or len(targets) <= 1:
+        outcomes = [generate(symbol) for symbol in targets]
+    else:
+        with ThreadPoolExecutor(max_workers=min(worker_count, len(targets))) as executor:
+            outcomes = [future.result() for future in as_completed([executor.submit(generate, symbol) for symbol in targets])]
+    for symbol, error in outcomes:
+        if error is None:
+            generated += 1
+        else:
+            failed.append((symbol, error))
+    failed.sort(key=lambda item: item[0])
+
+    return {
+        "checked": len(seen),
+        "generated": generated,
+        "skipped": skipped,
+        "failed": failed,
+    }
+
+
+def _print_stock_kline_page_sync(result: dict[str, object]) -> None:
+    failed = result["failed"]
+    click.echo(
+        "个股 K 线页: "
+        f"检查 {result['checked']}，生成/刷新 {result['generated']}，"
+        f"已是最新 {result['skipped']}，失败 {len(failed)}"
+    )
     for symbol, error in failed[:10]:
         click.echo(f"  {symbol}: {error}")
+
+
+def _ensure_stock_trendline_reports(config: dict, symbols: list[object], bars: int = 0) -> None:
+    """Generate fresh canonical stock K-line pages for linked static statistics reports."""
+    _print_stock_kline_page_sync(sync_stock_kline_pages(config, symbols=symbols, bars=bars))
 
 
 def run_rps_track(config: dict, symbol: str, window: int = 120):
@@ -303,6 +363,50 @@ def run_screen(
                 f"  {row['ts_code']:<10s} {str(row.get('name', ''))[:8]:<8s} "
                 f"评分 {row.get('score', '-')!s:>6s}  "
                 f"距线 {row.get('distance_pct', '-')!s:>7s}%  {row.get('reason', '')}"
+            )
+    return result
+
+
+def run_vpt_scan(
+    config: dict,
+    *,
+    pool: str | None = None,
+    pool_mode: str = "any",
+    trade_date: str | None = None,
+    lookback: int = 250,
+    top: int = 100,
+    min_score: float = 0.0,
+    state: str = "ALL",
+    history_days: int = 60,
+):
+    try:
+        result = save_vpt_scan(
+            config,
+            pool=pool,
+            pool_mode=pool_mode,
+            trade_date=trade_date,
+            lookback=lookback,
+            top=top,
+            min_score=min_score,
+            state=state,
+            history_days=history_days,
+        )
+    except (ValueError, StockPoolError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    counts = result.snapshot["vpt_state"].value_counts().to_dict() if not result.snapshot.empty else {}
+    click.echo(f"\nVPT-01 扫描已生成: {result.trade_date}")
+    click.echo(f"  全量状态: {result.snapshot_path}")
+    click.echo(f"  候选列表: {result.candidates_path}")
+    click.echo(f"  状态历史: {result.history_path}")
+    click.echo(f"  HTML报告: {result.html_path}")
+    click.echo(f"  扫描股票: {len(result.snapshot)}  候选: {len(result.candidates)}")
+    click.echo("  状态分布: " + " / ".join(f"{name} {counts.get(name, 0)}" for name in VPT_STATES))
+    if not result.candidates.empty:
+        for _, row in result.candidates.head(12).iterrows():
+            click.echo(
+                f"  {row['ts_code']:<10s} {str(row.get('name', ''))[:8]:<8s} "
+                f"{row.get('vpt_state', ''):<17s} 分数 {float(row.get('vpt_score', 0)):.2f} "
+                f"T0 {row.get('t0_date', '-')}"
             )
     return result
 
@@ -672,6 +776,29 @@ def rps_top(
     )
 
 
+@stats_group.command(name="stock-kline-pages")
+@click.option("--symbol", default="", help="仅同步指定股票；多个代码用逗号分隔")
+@click.option("--force", is_flag=True, help="忽略页面时间戳，重建所有可用个股 K 线页")
+@click.option("--strict", is_flag=True, help="存在页面生成失败时以错误退出")
+@click.option("--limit", default=0, type=click.IntRange(min=0), show_default=True, help="最多处理 N 只股票，0 表示全部缓存")
+@click.option("--bars", default=0, type=click.IntRange(min=0), show_default=True, help="每页使用最近 N 根日 K，0 表示完整缓存")
+@click.option("--workers", default=None, type=click.IntRange(min=1), help="页面生成并发数；默认读取配置")
+def stock_kline_pages_command(symbol: str, force: bool, strict: bool, limit: int, bars: int, workers: int | None):
+    """按本地缓存增量同步个股 K 线静态页面。"""
+    symbols = [item.strip().upper() for item in str(symbol or "").split(",") if item.strip()]
+    result = sync_stock_kline_pages(
+        _load_config(),
+        symbols=symbols or None,
+        force=force,
+        limit=limit,
+        bars=bars,
+        workers=workers,
+    )
+    _print_stock_kline_page_sync(result)
+    if strict and result["failed"]:
+        raise click.ClickException(f"个股 K 线页生成失败 {len(result['failed'])} 只")
+
+
 @stats_group.command(name="rps-track")
 @click.option("--symbol", required=True, help="股票代码")
 @click.option("--window", default=120, type=int, show_default=True, help="RPS 收益窗口，单位交易日")
@@ -741,6 +868,45 @@ def screen_command(
         save_pool=save_pool,
         pool_name=pool_name,
         merge_pool=merge_pool,
+    )
+
+
+@stats_group.command(name="vpt")
+@click.option("--pool", default=None, help="股票池名称，可选；多个股票池用英文逗号分隔")
+@click.option("--pool-mode", default="any", type=click.Choice(["any", "all"]), show_default=True)
+@click.option("--trade-date", default=None, help="截止交易日 YYYYMMDD，默认每只股票最新缓存日")
+@click.option("--lookback", default=250, type=click.IntRange(min=60), show_default=True, help="每只股票最多使用的历史K线")
+@click.option("--top", default=100, type=click.IntRange(min=0), show_default=True, help="报告最多展示的候选数量，0表示全部")
+@click.option("--min-score", default=0.0, type=click.FloatRange(min=0, max=100), show_default=True, help="候选最低VPT分数")
+@click.option(
+    "--state",
+    default="ALL",
+    type=click.Choice(["ALL", *VPT_CANDIDATE_STATES]),
+    show_default=True,
+    help="候选状态筛选",
+)
+@click.option("--history-days", default=60, type=click.IntRange(min=1), show_default=True, help="候选状态时间线交易日数")
+def vpt_command(
+    pool: Optional[str],
+    pool_mode: str,
+    trade_date: Optional[str],
+    lookback: int,
+    top: int,
+    min_score: float,
+    state: str,
+    history_days: int,
+):
+    """VPT-01 放量启动—供给收缩趋势筛选器。"""
+    run_vpt_scan(
+        _load_config(),
+        pool=pool,
+        pool_mode=pool_mode,
+        trade_date=trade_date,
+        lookback=lookback,
+        top=top,
+        min_score=min_score,
+        state=state,
+        history_days=history_days,
     )
 
 

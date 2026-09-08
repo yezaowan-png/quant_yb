@@ -1177,7 +1177,7 @@ function industryStockKlineOption(entry) {
       {scale: true, gridIndex: 2, name: '成交额', splitLine: {show: true, lineStyle: {color: '#edf2f7', type: 'dashed'}}, axisLabel: {color: '#6b778c'}}
     ],
     dataZoom: [
-      {type: 'inside', xAxisIndex: [0,1,2], start, end: 100, zoomOnMouseWheel: true, moveOnMouseWheel: true},
+      {type: 'inside', xAxisIndex: [0,1,2], start, end: 100},
       {type: 'slider', xAxisIndex: [0,1,2], start, end: 100, bottom: 4, height: 22}
     ],
     series: [

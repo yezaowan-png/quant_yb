@@ -241,9 +241,16 @@ class MarketStructureBriefTest(unittest.TestCase):
 
             output = generate_market_structure_brief(config, _structure(), root / "reports" / "index_forecast" / "brief.html")
             html = output.read_text(encoding="utf-8")
-            for title in ("第2屏", "指数趋势与技术结构", "第3屏", "分层市场广度", "横截面收益分布", "第5屏", "风格轮动、领涨质量与行业结构"):
+            for title in ("指数趋势与技术结构", "分层市场广度", "横截面收益分布", "风格轮动、领涨质量与行业结构"):
                 self.assertIn(title, html)
+            self.assertNotIn("第2屏", html)
+            self.assertNotIn("第3屏", html)
             self.assertNotIn("第4屏", html)
+            self.assertNotIn("第5屏", html)
+            self.assertIn('class="panel brief-section" data-section="index-technical" open', html)
+            self.assertIn('class="panel brief-section" data-section="layered-breadth" open', html)
+            self.assertIn('class="panel brief-section" data-section="style-and-structure" open', html)
+            self.assertIn("window.dispatchEvent(new Event('resize'))", html)
             self.assertNotIn("市场广度明细", html)
             self.assertIn("forecast-kline", html)
             self.assertIn("structure-layered-breadth", html)
@@ -267,12 +274,20 @@ class MarketStructureBriefTest(unittest.TestCase):
             self.assertIn("function compactTushareAmount(v)", html)
             self.assertIn("tooltip:{valueFormatter:compactTushareAmount}", html)
             self.assertIn("三市总成交额", html)
+            self.assertIn("三市总额5日均额", html)
+            self.assertIn("三市总额20日均额", html)
+            self.assertIn("function rollingMarketAmount(values,windowSize)", html)
             self.assertIn("量额比", html)
             self.assertIn("market_total_amount", html)
             self.assertIn("axisPointer:{link:[{xAxisIndex:[0,1,2,3,4]}]}", html)
             self.assertIn("axis.axisPointer={show:true,type:'line',snap:true", html)
             self.assertIn("量额比',3,volumeAmountRatio", html)
             self.assertIn("三市总额',4,compactTushareAmount", html)
+
+            industry_output = generate_industry_market_report(config, _structure(), root / "reports" / "industry" / "industry_market.html")
+            industry_html = industry_output.read_text(encoding="utf-8")
+            self.assertIn("{type: 'inside', xAxisIndex: [0,1,2], start, end: 100}", industry_html)
+            self.assertNotIn("function bindIndustryStockPointerZoom", industry_html)
             self.assertIn("function forecastKlineTooltip(params,d)", html)
             self.assertIn("forecastIndexName()+(change>=0?'上涨 ':'下跌 ')", html)
             self.assertIn("沪深300 / 中证1000 / 中证2000成交占比", html)
@@ -752,7 +767,8 @@ class MarketStructureBriefTest(unittest.TestCase):
             output = run_market_structure_brief(config)
             html = output.read_text(encoding="utf-8")
             self.assertIn("市场结构摘录", html)
-            self.assertIn("第2屏", html)
+            self.assertIn("指数趋势与技术结构", html)
+            self.assertNotIn("第2屏", html)
             self.assertNotIn("完整市场结构报告", html)
 
     def test_index_intraday_download_is_cached(self):

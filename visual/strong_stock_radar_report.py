@@ -421,7 +421,7 @@ def _stock_table(config: dict, output_path: Path, stocks: pd.DataFrame) -> str:
             + "</tr>"
         )
     header = "".join(f"<th>{html.escape(label)}</th>" for _, label in columns)
-    return f"<div class='table-wrap'><table id='stockTable' class='sortable'><thead><tr>{header}</tr></thead><tbody>{''.join(rows)}</tbody></table></div>"
+    return f"<div class='table-wrap strong-stock-table-wrap'><table id='stockTable' class='sortable'><thead><tr>{header}</tr></thead><tbody>{''.join(rows)}</tbody></table></div>"
 
 
 def _evaluation_table(evaluation: pd.DataFrame) -> str:
@@ -699,10 +699,12 @@ def generate_strong_stock_radar_report(
       const value = finiteOrNull(raw);
       return value === null ? (raw && raw !== '--' ? raw : null) : value;
     }
-    document.querySelectorAll('table.sortable th').forEach((th, index) => {
+    document.querySelectorAll('table.sortable th').forEach(th => {
       th.addEventListener('click', () => {
         const table = th.closest('table');
         const body = table.querySelector('tbody');
+        const index = Array.from(table.querySelectorAll('thead th')).indexOf(th);
+        if (index < 0) return;
         const current = th.dataset.order === 'asc' ? 'desc' : 'asc';
         table.querySelectorAll('th').forEach(item => delete item.dataset.order);
         th.dataset.order = current;
@@ -710,6 +712,7 @@ def generate_strong_stock_radar_report(
         rows.sort((a, b) => {
           const av = numberFromCell(a.children[index]);
           const bv = numberFromCell(b.children[index]);
+          if (av === null && bv === null) return 0;
           if (av === null) return 1;
           if (bv === null) return -1;
           if (typeof av === 'number' && typeof bv === 'number') return current === 'asc' ? av - bv : bv - av;
@@ -1017,7 +1020,7 @@ def generate_strong_stock_radar_report(
         .filters { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin:0 0 10px; }
         select, button { height:34px; border:1px solid var(--line); border-radius:6px; background:#fff; color:var(--ink); padding:0 10px; }
         button { cursor:pointer; } .link-filter { height:auto; padding:0; border:0; background:transparent; color:var(--blue); font-weight:800; }
-        .table-wrap { overflow:auto; } .chart { height:390px; background:#fff; border:1px solid var(--line); border-radius:8px; } .rotation-controls { display:flex; flex-wrap:wrap; gap:8px; margin:0 0 10px; align-items:center; } .rotation-threshold { display:flex; align-items:center; gap:5px; color:var(--muted); } .rotation-note { margin:0 0 10px; color:var(--muted); line-height:1.6; } .industry-summary { padding:9px 10px; margin:0 0 10px; background:#fff; border:1px solid var(--line); color:var(--muted); white-space:normal; line-height:1.7; } .spark { width:80px; height:24px; vertical-align:middle; } .spark polyline { fill:none; stroke:#2867d6; stroke-width:1.5; } table { width:100%; border-collapse:collapse; } th,td { padding:9px 10px; border-bottom:1px solid #e8edf3; white-space:nowrap; text-align:right; font-size:13px; }
+        .table-wrap { overflow:auto; } .strong-stock-table-wrap { max-height:min(70vh,620px); } .strong-stock-table-wrap thead th { position:sticky; top:0; z-index:1; } .chart { height:390px; background:#fff; border:1px solid var(--line); border-radius:8px; } .rotation-controls { display:flex; flex-wrap:wrap; gap:8px; margin:0 0 10px; align-items:center; } .rotation-threshold { display:flex; align-items:center; gap:5px; color:var(--muted); } .rotation-note { margin:0 0 10px; color:var(--muted); line-height:1.6; } .industry-summary { padding:9px 10px; margin:0 0 10px; background:#fff; border:1px solid var(--line); color:var(--muted); white-space:normal; line-height:1.7; } .spark { width:80px; height:24px; vertical-align:middle; } .spark polyline { fill:none; stroke:#2867d6; stroke-width:1.5; } table { width:100%; border-collapse:collapse; } th,td { padding:9px 10px; border-bottom:1px solid #e8edf3; white-space:nowrap; text-align:right; font-size:13px; }
         th { background:#f7f9fc; color:#435168; font-size:12px; cursor:pointer; user-select:none; } th::after { content:'\\2195'; color:#9aa6b8; font-size:10px; margin-left:4px; } th[data-order="asc"]::after { content:'\\2191'; color:var(--blue); } th[data-order="desc"]::after { content:'\\2193'; color:var(--blue); } th:first-child, td:first-child, th:nth-child(2), td:nth-child(2), th:nth-child(3), td:nth-child(3), th:nth-child(4), td:nth-child(4) { text-align:left; }
         tr:hover { background:#f9fbff; } tr[hidden] { display:none; }
         .badge { display:inline-flex; align-items:center; min-height:24px; padding:3px 7px; border-radius:6px; border:1px solid var(--line); background:#f7f9fb; font-weight:800; font-size:12px; }

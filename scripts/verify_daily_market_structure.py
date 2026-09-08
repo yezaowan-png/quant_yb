@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Verify the nightly market-structure and LLM archive postconditions.
+"""Verify the nightly deterministic market-structure archive postconditions.
 
 This script is intentionally read-only.  It derives the archive date from the
 latest market-structure JSON (the trading-data date, not the calendar run date)
-and exits non-zero unless both deterministic outputs and the DeepSeek summary
-were archived successfully.
+and exits non-zero unless the deterministic report and fact archive are valid.
 """
 
 from __future__ import annotations
@@ -28,8 +27,6 @@ V2_SCHEMA = "market_structure_v2"
 REQUIRED_ARTIFACT_KEYS = (
     "report",
     "json",
-    "llm_summary",
-    "llm_summary_html",
 )
 SUCCESS_ARTIFACT_STATUSES = {"written", "preserved", "preserved_links_updated"}
 
@@ -82,7 +79,7 @@ def verify_daily_market_structure_archive(
     symbol: str = "000001.SH",
     horizon: int = 5,
 ) -> dict[str, Any]:
-    """Validate the latest data-dated report and LLM archive without writing."""
+    """Validate the latest data-dated deterministic archive without writing."""
     symbol = symbol.upper()
     output = config.get("output") or {}
     statistics_dir = Path(output.get("statistics_dir", "output/statistics"))
@@ -119,11 +116,6 @@ def verify_daily_market_structure_archive(
     if manifest_horizon != int(horizon):
         errors.append(f"清单周期不是h{int(horizon)}")
 
-    llm_call = manifest.get("llm_call") or {}
-    if not isinstance(llm_call, dict) or llm_call.get("status") != "succeeded":
-        status = llm_call.get("status") if isinstance(llm_call, dict) else None
-        errors.append(f"本次LLM总结未成功，状态={status or 'missing'}")
-
     artifact_rows = manifest.get("artifacts") or []
     records = {
         str(item.get("key")): item
@@ -133,8 +125,6 @@ def verify_daily_market_structure_archive(
     expected_names = {
         "report": f"{prefix}_market_structure.html",
         "json": f"{prefix}_market_structure.json",
-        "llm_summary": f"{prefix}_llm_summary.md",
-        "llm_summary_html": f"{prefix}_llm_summary.html",
     }
     verified_paths: dict[str, str] = {}
     for key in REQUIRED_ARTIFACT_KEYS:
@@ -179,7 +169,7 @@ def verify_daily_market_structure_archive(
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="验收每日市场结构和LLM复盘归档")
+    parser = argparse.ArgumentParser(description="验收每日市场结构确定性归档")
     parser.add_argument("--config", default=str(PROJECT_ROOT / "config.yaml"))
     parser.add_argument("--symbol", default="000001.SH")
     parser.add_argument("--horizon", type=int, default=5)

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -55,6 +56,49 @@ def _lag_days(latest: pd.Timestamp | None, reference: pd.Timestamp | None) -> in
     return int((reference - latest).days)
 
 
+def _report_date(path: Path) -> pd.Timestamp | None:
+    if not path.exists():
+        return None
+    try:
+        with path.open("r", encoding="utf-8", errors="ignore") as handle:
+            prefix = handle.read(2_000_000)
+    except OSError:
+        return None
+    for pattern in (
+        r"数据(?:截至|截止)\s*(\d{4}-?\d{2}-?\d{2})",
+        r"数据日期\s*(\d{4}-?\d{2}-?\d{2})",
+        r"交易日期\s*(\d{4}-?\d{2}-?\d{2})",
+    ):
+        match = re.search(pattern, prefix)
+        if match:
+            value = pd.to_datetime(match.group(1), errors="coerce")
+            if not pd.isna(value):
+                return value.normalize()
+    return None
+
+
+def _report_freshness_summary(config: dict, reference_date: pd.Timestamp | None) -> dict[str, Any]:
+    reports_dir = Path(config.get("output", {}).get("reports_dir", "output/reports"))
+    symbol = str(config.get("index_overview", {}).get("default_symbol") or "000001.SH").upper()
+    report_paths = {
+        "市场结构摘录": reports_dir / "index_forecast" / f"{symbol}_market_structure_brief.html",
+        "行业行情": reports_dir / "industry" / "industry_market.html",
+        "强势股雷达": reports_dir / "strong_stock_radar" / "strong_stock_radar.html",
+        "VPT策略选股": reports_dir / "vpt" / "vpt_candidates.html",
+    }
+    rows = []
+    for label, path in report_paths.items():
+        report_date = _report_date(path)
+        current = report_date is not None and reference_date is not None and report_date == reference_date
+        rows.append({"label": label, "path": path, "date": report_date, "current": current})
+        print(f"{label}: 数据日期 {_fmt_date(report_date)}，路径 {path}")
+    return {
+        "reports": rows,
+        "current_count": sum(1 for row in rows if row["current"]),
+        "expected_count": len(rows),
+    }
+
+
 def _section_summary(
     *,
     label: str,
@@ -102,6 +146,7 @@ def _section_summary(
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="检查每日行业/概念/指数行情缓存是否新鲜")
+    parser.add_argument("--expected-date", default=None, help="期望的最近完整交易日 YYYYMMDD")
     parser.add_argument("--max-lag-calendar-days", type=int, default=None, help="允许相对参考指数落后的最大自然日")
     parser.add_argument("--stale-preview", type=int, default=12, help="每类最多打印多少个落后标的")
     parser.add_argument("--strict", action="store_true", help="发现指数整体缺失或板块最新日期超阈值时返回非 0")
@@ -154,15 +199,31 @@ def main() -> int:
         max_lag_days=default_lag,
         stale_preview=args.stale_preview,
     )
+    report_summary = _report_freshness_summary(config, reference_date)
 
     if not args.strict:
         return 0
     if reference_date is None:
         return 1
+    expected_date = None
+    if args.expected_date:
+        expected_date = pd.to_datetime(args.expected_date, format="%Y%m%d", errors="coerce")
+        if pd.isna(expected_date):
+            print(f"无效 expected-date: {args.expected_date}")
+            return 1
+        expected_date = expected_date.normalize()
+        if reference_date != expected_date:
+            print(f"指数参考日期 {_fmt_date(reference_date)} 未达到目标 {_fmt_date(expected_date)}")
+            return 1
     for summary in (industry_summary, concept_summary):
         latest = summary["latest"]
+        if expected_date is not None and latest != expected_date:
+            print(f"{summary['label']} 最新日期 {_fmt_date(latest)} 未达到目标 {_fmt_date(expected_date)}")
+            return 1
         if latest is None or _lag_days(latest, reference_date) is None or _lag_days(latest, reference_date) > default_lag:
             return 1
+    if report_summary["current_count"] != report_summary["expected_count"]:
+        return 1
     return 0
 
 

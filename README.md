@@ -200,6 +200,7 @@ quant> stats pattern --pattern bottom_pattern_break --pool 机器人
 quant> stats pattern --pattern needle_bottom_raise
 quant> stats screen --preset trendline_pullback --pool 机器人,AI --pool-mode any --top 50
 quant> stats screen --preset trendline_pullback --pool 机器人 --save-pool --pool-name 趋势线回踩池
+quant> stats vpt --top 100 --min-score 70
 quant> stats rotation --model momentum --hold-count 5 --rebalance-days 5
 quant> stats limit-board --trade-date 20260703 --save-pools
 quant> stats limit-research --months 6 --min-limit-count 1 --fundamental-top 120
@@ -211,6 +212,8 @@ quant> dashboard
 ```
 
 `stats screen` 是通用选股筛选入口，第一版内置 `trendline_pullback`：寻找存在有效上升趋势线、最近 3 个交易日回落/贴近趋势线且未有效跌破的股票，可叠加 `--pool` 和 `--pool-mode any/all` 做题材漏斗。结果默认只输出 CSV/HTML；只有显式传 `--save-pool --pool-name ...` 才会写入股票池。
+
+`stats vpt` 是独立的 VPT-01 放量启动—供给收缩趋势筛选器。它从本地日 K 中识别 T0 放量上涨/突破事件，再以 T0 后的 UDVR、方向成交量、回调量比、MA10/MA20、高低点和趋势回归质量生成 `NONE`、`SPIKE_DETECTED`、`TREND_CONFIRMING`、`QUALIFIED`、`WEAKENING`、`FAILED` 状态。扫描严格按截止日截断数据，T0 巨量不进入后续量能比较；VPT 与 RS 分开呈现，不写入正式策略、仓位或订单。核心阈值可在 `config.yaml` 的 `vpt` 段按 `VPTConfig` 字段覆盖。
 
 `stats radar` 生成研究型“强势股雷达”：从可交易股票池出发，计算行业 RS、股票 RS percentile、RS persistence、趋势结构、高位距离、量价状态、收缩状态和 deterministic state，并保存每日 snapshot 供 T+5/T+10/T+20 后验审计。`BREAKOUT` 等 state 只表示观察分类，不是买入建议，也不会写入正式策略、仓位或风险闸门。
 
@@ -230,7 +233,9 @@ python main.py etf signals --refresh --symbol 515880.SH --top-n 10
 
 市场单在次一交易日开盘执行前会再次检查当日涨跌停价格，避免只检查信号日却在次日一字涨停买入或一字跌停卖出。卖出印花税默认按成交日期切换：2023-08-28 前为 0.1%，之后为 0.05%；可用 `date_aware_stamp_duty: false` 固定使用 `stamp_duty`。
 
-`dashboard` 是本地研究工作台：左侧提供市场/信号/指数/题材/ETF/策略/报告索引，主区域展示市场状态、信号流、指数导航、题材看板、ETF 策略板块、策略汇总和最近单标的报告。它会自动收录最近的 RPS、形态扫描、选股筛选、涨跌停、轮动研究和强势股雷达到“信号中心”，并基于市场结构事实层和本地 THS 行情缓存增量刷新“市场结构摘录版”和“行业/概念行情页”：事实 JSON、THS 行情缓存与生成器未变化时直接复用已有报告，避免每次 dashboard 都重写数千个页面。摘录页也可以用 `python main.py index structure-brief` 从已有 JSON 和本地缓存单独生成。
+`dashboard` 默认生成轻量的产品导航壳：主入口为今日总览、数据中心、市场环境、行情中心、强势方向和策略选股；RPS、涨停、ETF、回测、预测等研究页归入备用报告入口。它只读取已有本地报告，不下载数据、不刷新市场结构、不生成行业/个股页面。原来的聚合总面板仍可用 `python main.py dashboard --legacy` 生成到 `output.reports_dir/legacy_dashboard.html`；摘录页也可以用 `python main.py index structure-brief` 从已有 JSON 和本地缓存单独生成。
+
+`index environment` 从已有市场结构 JSON 生成 `output.reports_dir/index_forecast/{symbol}_market_environment.html`：先展示现有状态结论与六类关键证据，再在“详细研究”折叠区保留原市场结构摘录和完整报告入口。该命令不下载数据、不运行市场结构计算、不调用 LLM。
 
 ## 股票 K 线与手动画线工具
 
@@ -268,6 +273,7 @@ quant> trendlines --symbol 000001.SZ --bars 0
 - `output.statistics_dir/rps_track_{symbol}_{window}.csv/html`：个股 RPS 轨迹。
 - `output.signals_dir/pattern_signals_{pattern}_{date}.csv/html`：形态扫描结果。
 - `output.signals_dir/screen_signals_{preset}[_pool]_{date}.csv/html`：通用选股筛选结果。
+- `output.signals_dir/vpt_candidates_{date}.csv`：VPT-01 候选；全量状态与候选历史分别为 `output.statistics_dir/vpt/vpt_snapshot_{date}.csv`、`vpt_history_{date}.csv`，交互报告为 `output.reports_dir/vpt/vpt_candidates.html`。
 - `output.statistics_dir/rotation_{model}_{pool}_{start}_{end}_nav.csv`：轮动研究净值。
 - `output.statistics_dir/limit_board_{date}.csv/html`：每日涨跌停看板。
 - `output.statistics_dir/limit_up_research_{start}_{end}_detail.csv`：区间涨停明细。
